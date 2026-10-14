@@ -66,6 +66,7 @@ python GenreShark.py "D:\Music" --undo        # 3. revert the most recent run
 | Option | What it does |
 |---|---|
 | `--dry-run` | Look up genres and write `genre_dry_run_<id>.csv` listing every proposed change. Changes nothing else and never prompts. |
+| `--dry-run-cached` | Look up genres and write `genre_dry_run_<id>.csv` allows `artist_cache.json` to be read from and written to, so any resolved artist lookups during your dry run are safely cached. |
 | `--report FILE.csv` | Write the same CSV during a real run. |
 | `--only-untagged` | Only tag files with no genre. Fully tagged folders are skipped without any network calls. |
 | `--overwrite` / `--no-overwrite` | Answer the "replace existing genre?" question up front. |
