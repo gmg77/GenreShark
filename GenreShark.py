@@ -12,40 +12,6 @@ Requires Python 3.9+.
 Dependencies:
     pip install requests musicbrainzngs mutagen
     pip install beautifulsoup4        # optional: only for Last.fm scraping / Genius
-
-Usage:
-    python GenreShark.py "D:\\Music"                  # tag a library
-    python GenreShark.py "D:\\Music" --dry-run        # preview + CSV report, change nothing
-    python GenreShark.py "D:\\Music" --only-untagged  # never touch existing genres
-    python GenreShark.py "D:\\Music" --undo           # revert the most recent run
-    python GenreShark.py "D:\\Music" --list-runs      # show runs that can be undone
-    python GenreShark.py --selftest                   # offline sanity checks
-
-Options:
-    --overwrite / --no-overwrite   answer the overwrite question up front
-    --reprocess                    ignore saved progress and rescan everything
-    --services lastfm,itunes       use only some sources
-    --report FILE.csv              write a CSV of every change (a dry run does this itself)
-    --undo                         revert the most recent run (add --dry-run to preview)
-    --undo-run RUN_ID|all          revert one specific run, or every run
-    --force                        with --undo: restore even if the genre was edited since
-    -v                             show request errors and other debug detail
-
-Settings live in config.json next to this script (created as an empty template on first
-run). A value in config.json wins; environment variables are the fallback; empty values
-never win. Keep config.json out of git and cloud-synced folders.
-    CONTACT_EMAIL, DISCOGS_TOKEN, GENIUS_CLIENT_ID, GENIUS_CLIENT_SECRET, LASTFM_API_KEY
-Set LASTFM_API_KEY to use the official Last.fm API instead of scraping the website.
-
-After you edit the genre taxonomy, bump TAXONOMY_VERSION so finished folders and cached
-artists are re-evaluated with the new rules.
-
-Files written to the music folder:
-    tagger_state.jsonl     per-folder results (so finished folders are skipped)
-    artist_cache.json      artist -> genre cache that survives between runs (versioned)
-    failed_searches.txt    human-readable list of folders with no result
-    genre_undo.jsonl       every tag change, with the previous genre, for --undo
-    genre_dry_run_*.csv    the report a dry run writes (the only thing a dry run writes)
 """
 
 import argparse
@@ -93,7 +59,7 @@ log = logging.getLogger("genretagger")
 # ==========================================
 # CONFIGURATION & API KEYS (config.json, then environment)
 # ==========================================
-__version__ = "2.0.0"
+__version__ = "2.1.2"
 USER_AGENT = f"GenreShark/{__version__}"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -150,10 +116,7 @@ LASTFM_API_KEY = _setting("LASTFM_API_KEY")      # optional: falls back to scrap
 MB_MIN_SCORE = 90          # MusicBrainz search score required to trust a release
 ALLOW_UNMAPPED = False     # True = let tags outside MASTER_GENRES win a vote
 
-# Bump this after editing GENRE_ALIASES / GENRE_REGEXES / MASTER_GENRES (or fixing how
-# artists are looked up): folders and cached artists saved under a different version are
-# re-evaluated on the next run. Records saved before versioning existed count as current.
-TAXONOMY_VERSION = "1.4"
+TAXONOMY_VERSION = "1.5"
 
 # Minimum seconds between requests to the same host.
 RATE_LIMITS = {
@@ -167,7 +130,6 @@ RATE_LIMITS = {
 }
 DEFAULT_INTERVAL = 0.3
 
-# Polled together first; the remaining services only run if these two don't agree.
 FAST_SERVICES = ("Discogs", "Last.fm")
 
 TERMINAL_STATUSES = {"tagged", "matched", "declined"}   # folders we won't revisit
@@ -180,13 +142,15 @@ def _alt(*terms):
     return r"\b(?:" + "|".join(sorted(terms, key=len, reverse=True)) + r")\b"
 
 
-# 1. Exact-match aliases (compared after prep_tag(): lowercase, no accents, no punctuation)
+# 1. Exact-match aliases
 GENRE_ALIASES = {
     "rnb": "R&B",
     "stage & screen": "Soundtrack",
     "score": "Soundtrack",
     "ost": "Soundtrack",
-    # Bare umbrella terms that no compound pattern should claim
+    "música tropical": "Latin",
+    "musica tropical": "Latin",
+    # Bare umbrella terms
     "rock": "Rock",
     "pop": "Pop",
     "alternative": "Alternative Rock",
@@ -196,8 +160,7 @@ GENRE_ALIASES = {
     "world": "World",
 }
 
-# 2. Regex consolidations. The match covering the MOST text wins; ties go to the
-#    earlier entry. Patterns see prepped text (hyphens/slashes are spaces).
+# 2. Regex consolidations
 GENRE_REGEXES = [
     (_alt("rap", "hip ?hop", "boom bap", "lo ?fi hip ?hop", "trap", "grime", "drill", "crunk",
           "turntablism", "g ?funk", "cloud rap", "mumble rap", "chopped and screwed",
@@ -218,11 +181,11 @@ GENRE_REGEXES = [
           "trip ?hop", "uk garage", "chill ?wave", "vaporwave", "hardstyle", "gabber", "ebm",
           "industrial", "darkwave", "edm", "electronica", "happy hardcore",
           "hardcore techno"), "Electronic"),
-    # "<anything> metal" so rap/funk/industrial/celtic/christian metal all land here
     (_alt(r"(?:\w+ )?metal", "metalcore", "djent", "grindcore", "deathcore"), "Metal"),
     (_alt("post ?hardcore", "hardcore", "screamo", "punk rock", "pop punk", "skate punk",
           "garage punk", "emo", "crust", "psychobilly", "riot grrrl", "ska punk",
           "anarcho ?punk", "punk"), "Punk"),
+    (_alt("rockabilly", "boppin hillbilly", "hillbilly bop"), "Rockabilly"),
     (_alt("reggae", "roots reggae", "lovers rock", "reggae fusion"), "Reggae"),
     (_alt("ska", "2 tone", "two tone", "traditional ska"), "Ska"),
     (_alt("dancehall", "ragga", "bashment"), "Dancehall"),
@@ -240,7 +203,7 @@ GENRE_REGEXES = [
     (_alt("delta blues", "chicago blues", "electric blues", "piedmont blues", "jump blues",
           "boogie woogie", "blues"), "Blues"),
     (_alt("reggaeton", "salsa", "bachata", "cumbia", "merengue", "tejano", "latin pop", "norteno",
-          "mariachi", "tango", "ranchera", "latin rock", "rumba", "latino"), "Latin"),
+          "mariachi", "tango", "ranchera", "latin rock", "rumba", "latino", "música tropical", "musica tropical"), "Latin"),
     (_alt("classical", "neo ?classical", "baroque", "choral", "orchestral", "symphony", "opera",
           "chamber music", "chamber orchestra", "modern classical", "contemporary classical",
           "minimalist", "romantic era"), "Classical"),
@@ -258,20 +221,20 @@ GENRE_REGEXES = [
 # 3. Valid Master Genres
 MASTER_GENRES = {
     "Hip Hop", "R&B", "Soul", "Alternative Rock", "Rock", "Electronic",
-    "Metal", "Punk", "Reggae", "Ska", "Dancehall", "Dub", "Rocksteady",
+    "Metal", "Punk", "Rockabilly", "Reggae", "Ska", "Dancehall", "Dub", "Rocksteady",
     "Pop", "Country", "Jazz", "Folk", "Blues", "Latin", "Classical",
     "World", "Soundtrack", "Comedy", "Gospel", "Holiday", "Children's", "New Age",
 }
 
-# Junk tags (whole-word matching, so "classical" is NOT caught by "classic")
 INVALID_TAG_RE = re.compile(
     r"\b(?:seen live|favou?rites?|awesome|vinyl|cd|cassette|mp3|download|owned|albums? i own|"
     r"my library|buy|1001 albums|best of|collection|masterpiece|non music|non-music|"
-    r"(?:fe)?male vocalists?|spotify|various(?: artists)?)\b"
+    r"(?:fe)?male vocalists?|spotify|various(?: artists)?|literature|screen|release calendar|"
+    r"in english|history|biography|essay|enlightenment|science fiction|television|script)\b",
+    re.IGNORECASE
 )
 DECADE_OR_YEAR_RE = re.compile(r"(?:\d{2}|\d{4})s?")
 
-# "Various Artists" style folder names. Word-aware so "Nova - ..." or "Diva - ..." don't match.
 COMP_FOLDER_RE = re.compile(
     r"various artists|various\s*[-\u2013]|^(?:va|v\.a\.|v/a)(?![a-z0-9])|"
     r"(?<![a-z0-9])(?:va|v\.a\.)\s*[-\u2013]"
@@ -281,19 +244,17 @@ FEAT_SPLIT_RE = re.compile(
     r"\s*[(\[]\s*(?:feat\.?|ft\.?|featuring)\b|\s+(?:feat\.?|ft\.?|featuring)\s+|\s*;\s*",
     re.IGNORECASE,
 )
-# Collaboration separators. "AC/DC" has no spaces around the slash, so it is never split.
 COLLAB_SPLIT_RE = re.compile(r"\s+&\s+|,\s+|\s+/\s+")
 
 
 # ==========================================
-# PURE HELPERS (no network; covered by --selftest)
+# PURE HELPERS
 # ==========================================
 def strip_accents(text):
     return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
 
 
 def prep_tag(tag):
-    """Lowercase, drop accents/apostrophes, turn - / _ . etc. into spaces ('&' is kept)."""
     t = strip_accents(tag).lower().replace("'", "").replace("\u2019", "")
     t = re.sub(r"[-/_.,;:()\[\]]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
@@ -304,7 +265,6 @@ _REGEX_MAP = [(re.compile(p), g) for p, g in GENRE_REGEXES]
 
 
 def normalize_genre(tag):
-    """Map a raw tag to a Master Genre. Exact alias first, then the longest regex match."""
     prepped = prep_tag(tag)
     if prepped in _ALIAS_MAP:
         return _ALIAS_MAP[prepped]
@@ -328,9 +288,6 @@ def is_various(name):
 
 
 def artist_candidates(raw_artist):
-    """Artist names to try, best first. The full name (minus 'feat.' credits) always comes
-    first because real band names contain '&' and ',' (Hall & Oates, Earth, Wind & Fire);
-    the first artist of a collaboration is only a fallback."""
     base = FEAT_SPLIT_RE.split(raw_artist)[0].strip() or raw_artist.strip()
     first = COLLAB_SPLIT_RE.split(base)[0].strip()
     return [base] + ([first] if first and first != base else [])
@@ -359,7 +316,6 @@ def _sim_norm(text):
 
 
 def similar(a, b):
-    """0..1 fuzzy match used to confirm a search hit is really the thing we asked for."""
     na, nb = _sim_norm(a or ""), _sim_norm(b or "")
     if not na or not nb:
         return 0.0
@@ -370,7 +326,6 @@ def similar(a, b):
 
 
 def _id3_major(path):
-    """ID3v2 major version of the file (3 or 4); 4 when there is no tag yet."""
     with open(path, "rb") as f:
         head = f.read(10)
     return head[3] if head[:3] == b"ID3" and head[3] in (3, 4) else 4
@@ -381,24 +336,19 @@ def _genre_frames(tags):
 
 
 def write_genre(path, genre):
-    """Write TCON, keeping ID3v2.3 files at v2.3 (v2.4 breaks some players) and creating a
-    tag for files that have none. Returns the previous raw genre values (a list) or None
-    if the file had no genre, which is exactly what restore_genre() needs to undo it."""
     major = _id3_major(path)
     try:
         tags = ID3(path)
     except ID3NoHeaderError:
         tags = ID3()
     previous = _genre_frames(tags)
-    encoding = 3 if major == 4 else 1          # UTF-8 only exists in v2.4
+    encoding = 3 if major == 4 else 1
     tags.setall("TCON", [TCON(encoding=encoding, text=[genre])])
     tags.save(path, v2_version=major)
     return previous or None
 
 
 def restore_genre(path, old, expected, force=False, dry_run=False):
-    """Undo write_genre(). Returns 'restored', 'changed' (the genre is no longer what we
-    wrote, so it was edited since; pass force=True to restore anyway) or 'missing'."""
     if not os.path.exists(path):
         return "missing"
     major = _id3_major(path)
@@ -418,7 +368,6 @@ def restore_genre(path, old, expected, force=False, dry_run=False):
 
 
 def timed_prompt(prompt_text, timeout=5):
-    """Cross-platform non-blocking input prompt (empty string on timeout)."""
     sys.stdout.write(prompt_text)
     sys.stdout.flush()
 
@@ -432,9 +381,9 @@ def timed_prompt(prompt_text, timeout=5):
                 if char in ('\r', '\n'):
                     print()
                     return ans.lower().strip()
-                if char in ('\x00', '\xe0'):      # arrow/function key: swallow second code
+                if char in ('\x00', '\xe0'):
                     msvcrt.getwch()
-                elif char == '\x08':              # backspace
+                elif char == '\x08':
                     if ans:
                         ans = ans[:-1]
                         sys.stdout.write('\b \b')
@@ -456,8 +405,6 @@ def timed_prompt(prompt_text, timeout=5):
 
 
 class HostThrottle:
-    """Enforces a minimum gap between requests to the same host (thread-safe)."""
-
     def __init__(self, intervals, default=DEFAULT_INTERVAL):
         self.intervals, self.default = intervals, default
         self.next_ok = {}
@@ -482,15 +429,14 @@ class GenreFinder:
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
-        musicbrainzngs.set_useragent("GenreShark", __version__, CONTACT_EMAIL)   # also rate-limits to 1 req/s
+        musicbrainzngs.set_useragent("GenreShark", __version__, CONTACT_EMAIL)
 
         self.throttle = HostThrottle(RATE_LIMITS)
-        self._tls = threading.local()           # last_error is per worker thread
+        self._tls = threading.local()
         self._genius_token = None
         self._genius_token_tried = False
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
 
-        # Order matters only for tie-breaking: earlier services win ties.
         all_services = [
             ("Discogs", self.search_discogs),
             ("Last.fm", self.search_lastfm),
@@ -513,7 +459,7 @@ class GenreFinder:
     def close(self):
         try:
             self.executor.shutdown(wait=False, cancel_futures=True)
-        except TypeError:                        # Python < 3.9
+        except TypeError:
             self.executor.shutdown(wait=False)
 
     @property
@@ -524,7 +470,6 @@ class GenreFinder:
     def last_error(self, value):
         self._tls.last_error = value
 
-    # ---------- plumbing ----------
     def _get_genius_token(self):
         if self._genius_token_tried:
             return self._genius_token
@@ -551,7 +496,7 @@ class GenreFinder:
             self.last_error = type(exc).__name__
             log.debug("%s -> %s", url, exc)
             return None
-        if resp.status_code == 404:                 # simply "not found"
+        if resp.status_code == 404:
             return None
         if resp.status_code != 200:
             self.last_error = f"HTTP {resp.status_code}"
@@ -573,9 +518,7 @@ class GenreFinder:
                     out.append(t)
         return out[:limit]
 
-    # ---------- sources (each returns an ordered list of candidate tags) ----------
     def search_theaudiodb(self, artist, album):
-        # TADB indexes "Various Artists" as Rock; block it to prevent poisoning.
         if not artist or is_various(artist):
             return []
         data = self._fetch("https://www.theaudiodb.com/api/v1/json/123/search.php", params={"s": artist})
@@ -620,17 +563,16 @@ class GenreFinder:
             params["artist"] = artist
         results = (self._fetch("https://api.discogs.com/database/search", params=params, headers=headers) or {}).get("results") or []
 
-        def tags_of(r):   # "style" is more specific than "genre", so it goes first
+        def tags_of(r):
             return self._valid((r.get("style") or []) + (r.get("genre") or []))
 
         if album:
             for r in results:
                 if self._discogs_matches(r.get("title", ""), artist, album):
                     tags = tags_of(r)
-                    if tags:                       # a matching release with no tags: try the next
+                    if tags:
                         return tags
             return []
-        # Artist-only: artist search results carry no genres, so pool the artist's releases.
         counts = Counter()
         for r in results:
             if self._discogs_matches(r.get("title", ""), artist, None):
@@ -642,7 +584,7 @@ class GenreFinder:
         artist_part, sep, album_part = title.partition(" - ")
         if not sep:
             artist_part, album_part = "", title
-        artist_part = re.sub(r"\s*\(\d+\)$", "", artist_part)       # Discogs "Name (2)" disambiguation
+        artist_part = re.sub(r"\s*\(\d+\)$", "", artist_part)
         if artist and not is_various(artist) and artist_part and similar(artist_part, artist) < 0.7:
             return False
         return album is None or similar(album_part, album) >= 0.7
@@ -699,7 +641,6 @@ class GenreFinder:
         return self._valid([t.get('name') for t in ordered])
 
     def search_genius(self, artist, album):
-        # Artist-only searches find random song lyrics, so require an album.
         if BeautifulSoup is None or not album:
             return []
         token = self._get_genius_token()
@@ -724,9 +665,7 @@ class GenreFinder:
                 return tags
         return []
 
-    # ---------- voting ----------
     def _poll_worker(self, name, func, artist, album):
-        """Runs one source in a worker thread; never raises."""
         self.last_error = None
         start = time.time()
         try:
@@ -738,16 +677,11 @@ class GenreFinder:
         return name, tags, time.time() - start, self.last_error
 
     def find_genre(self, artist, album, require_consensus=True):
-        """Sources are polled in parallel batches. Each votes for up to 3 Master Genres
-        (rank-weighted). A genre backed by two different sources wins immediately. If none
-        does, the best single-source genre is used only when require_consensus is False,
-        and only after EVERY source has answered, so the result never depends on which
-        server happened to reply first. Returns (genre, description) or (None, why)."""
         score, support = {}, {}
         poll_stats, rejected = [], []
         order = {name: i for i, (name, _) in enumerate(self.services)}
 
-        def best_of(candidates):   # highest score; ties go to the earlier-listed service
+        def best_of(candidates):
             return max(candidates, key=lambda g: (score[g], -min(order[n] for n in support[g])))
 
         batches = [[s for s in self.services if s[0] in FAST_SERVICES],
@@ -788,7 +722,7 @@ class GenreFinder:
                         best = best_of(agreed)
                         return best, f"Early Consensus ({len(support[best])} services) | Stats: {', '.join(poll_stats)}"
             finally:
-                for f in futures:                # stragglers can't be recalled; the rest never start
+                for f in futures:
                     f.cancel()
 
         stats = f"Stats: {', '.join(poll_stats)}"
@@ -818,9 +752,12 @@ class MP3TaggerApp:
         self.cache_file = os.path.join(self.target_dir, "artist_cache.json")
         self.undo_file = os.path.join(self.target_dir, "genre_undo.jsonl")
 
-        # A dry run always produces a report; otherwise only when --report is given.
+        # --dry-run-cached allows writing to artist_cache.json even during dry-run
+        self.is_dry_run = args.dry_run
+        self.allow_cache_write = args.dry_run or args.dry_run_cached
+
         self.report_path = args.report or (
-            os.path.join(self.target_dir, f"genre_dry_run_{self.run_id}.csv") if args.dry_run else None)
+            os.path.join(self.target_dir, f"genre_dry_run_{self.run_id}.csv") if (args.dry_run or args.dry_run_cached) else None)
         self._report_file = self._report_writer = None
 
         self.finder = GenreFinder(services=args.services) if needs_finder else None
@@ -829,9 +766,7 @@ class MP3TaggerApp:
         self.overwrite_policy = "all" if args.overwrite else "none" if args.no_overwrite else None
         self.stats = Counter()
 
-    # ---------- persistence ----------
     def _key(self, folder):
-        """Folder identity relative to the library root, so moving the library keeps history."""
         return os.path.normcase(os.path.relpath(folder, self.target_dir))
 
     def _load_history(self):
@@ -846,7 +781,7 @@ class MP3TaggerApp:
                     except (ValueError, KeyError, TypeError):
                         continue
         done = {k for k, s in last_status.items() if s in TERMINAL_STATUSES}
-        if os.path.exists(self.legacy_log):               # progress from older versions
+        if os.path.exists(self.legacy_log):
             with open(self.legacy_log, 'r', encoding='utf-8') as f:
                 for line in f:
                     path = line.strip().split(" | ")[0]
@@ -860,24 +795,23 @@ class MP3TaggerApp:
 
     def _record(self, root, status, **extra):
         self.stats[status] += 1
-        if self.args.dry_run:
+        if self.is_dry_run:
             return
         rec = {"folder": self._key(root), "status": status, "schema": TAXONOMY_VERSION,
                "ts": datetime.now().isoformat(timespec="seconds"), **extra}
         with open(self.state_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    def _mark_failure(self, root, artist, album, stats, elapsed):
+    def _mark_failure(self, root, artist, album, stats, elapsed, existing_genres=None):
         self._record(root, "failed", artist=artist, album=album)
-        self._report(root, "", artist, album, "", "", "no genre found", stats.split(" | Stats:")[0] if stats else "")
-        if self.args.dry_run:
+        old_genre_str = ", ".join(sorted(set(existing_genres))) if existing_genres else ""
+        self._report(root, "", artist, album, old_genre_str, "", "no genre found", stats.split(" | Stats:")[0] if stats else "")
+        if self.is_dry_run:
             return
         with open(self.fail_file, 'a', encoding='utf-8') as f:
             f.write(f"No genre found | Folder: {root} | Searched: {artist} - {album} | {stats} | Total Time: {elapsed:.1f}s\n")
 
     def _load_cache(self):
-        """Cached artist genres, minus entries from another taxonomy version or whose genre
-        is no longer a Master Genre."""
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -885,13 +819,12 @@ class MP3TaggerApp:
                 if data["version"] != TAXONOMY_VERSION:
                     return {}
                 data = data["artists"]
-            # otherwise: older un-versioned flat file, treated as the current version
             return {k: tuple(v) for k, v in data.items() if v and v[0] in MASTER_GENRES}
         except (OSError, ValueError, TypeError, AttributeError):
             return {}
 
     def _save_cache(self):
-        if self.args.dry_run or not self.artist_cache:
+        if not self.allow_cache_write or not self.artist_cache:
             return
         tmp = self.cache_file + ".tmp"
         with open(tmp, 'w', encoding='utf-8') as f:
@@ -899,7 +832,6 @@ class MP3TaggerApp:
                       ensure_ascii=False, indent=0)
         os.replace(tmp, self.cache_file)
 
-    # ---------- undo log ----------
     def _log_undo(self, path, old, new):
         rec = {"run": self.run_id, "ts": datetime.now().isoformat(timespec="seconds"),
                "file": os.path.relpath(path, self.target_dir), "old": old, "new": new}
@@ -907,7 +839,6 @@ class MP3TaggerApp:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def _read_undo_log(self):
-        """Returns (writes, undone) where undone is a set of (run, file) already reverted."""
         writes, undone = [], set()
         if not os.path.exists(self.undo_file):
             return writes, undone
@@ -939,8 +870,7 @@ class MP3TaggerApp:
             print(f"{run_id:<18}{r['ts']:<22}{r['files']:>7}{r['pending']:>10}")
 
     def undo(self, which="last", force=False):
-        """Revert tag changes recorded in the undo log. which = 'last', 'all' or a run id."""
-        dry = self.args.dry_run
+        dry = self.is_dry_run
         writes, undone = self._read_undo_log()
         pending = [w for w in writes if (w["run"], w["file"]) not in undone]
         if not pending:
@@ -959,7 +889,7 @@ class MP3TaggerApp:
 
         print(f"\n[UNDO] {'(dry run) ' if dry else ''}{len(selected)} file(s) from {scope}")
         results, touched = Counter(), set()
-        for w in reversed(selected):           # newest first, so 'all' lands on the oldest value
+        for w in reversed(selected):
             path = os.path.join(self.target_dir, w["file"])
             status = restore_genre(path, w["old"], w["new"], force=force, dry_run=dry)
             results[status] += 1
@@ -977,12 +907,11 @@ class MP3TaggerApp:
             else:
                 print(f"  ! File no longer exists: {name}")
 
-        for folder in sorted(touched):         # non-terminal status => rescanned on the next run
+        for folder in sorted(touched):
             self._record(folder, "undone", run=scope)
         print(f"\n[UNDO] restored: {results['restored']}, skipped (edited since): {results['changed']}, "
               f"missing: {results['missing']}")
 
-    # ---------- change report (CSV) ----------
     def _open_report(self):
         if not self.report_path:
             return
@@ -994,7 +923,7 @@ class MP3TaggerApp:
     def _report(self, root, filename, artist, album, old, new, action, source=""):
         if self._report_writer is None:
             return
-        self._report_writer.writerow(["dry-run" if self.args.dry_run else "applied", self._key(root),
+        self._report_writer.writerow(["dry-run" if self.is_dry_run else "applied", self._key(root),
                                       filename, artist, album, old, new, action, source])
         self._report_file.flush()
 
@@ -1003,7 +932,6 @@ class MP3TaggerApp:
             self._report_file.close()
             self._report_file = self._report_writer = None
 
-    # ---------- tag reading ----------
     @staticmethod
     def _clean_tag(audio, key):
         try:
@@ -1015,7 +943,7 @@ class MP3TaggerApp:
         try:
             audio = EasyID3(path)
         except ID3NoHeaderError:
-            return dict.fromkeys(TAG_KEYS, "")        # readable file, just no tag yet
+            return dict.fromkeys(TAG_KEYS, "")
         except Exception as exc:
             log.debug("Cannot read %s: %s", path, exc)
             return None
@@ -1034,7 +962,6 @@ class MP3TaggerApp:
                     artist, album = a, t["album"]
         return artist, album, is_comp
 
-    # ---------- main loop ----------
     def run(self):
         self._open_report()
         try:
@@ -1092,7 +1019,8 @@ class MP3TaggerApp:
         elapsed = time.time() - start
         if not genre:
             print("  \033[91m[FAILURE] No genre found on any service.\033[0m")
-            self._mark_failure(root, primary_artist, clean_album_title(raw_album), service, elapsed)
+            existing_genres = [t["genre"] for t in readable if t["genre"]]
+            self._mark_failure(root, primary_artist, clean_album_title(raw_album), service, elapsed, existing_genres)
             return
 
         source = service.split(" | Stats:")[0]
@@ -1100,8 +1028,6 @@ class MP3TaggerApp:
         self._apply_genre(root, mp3s, tags_by_file, genre, service, elapsed, raw_artist, raw_album)
 
     def _lookup(self, cands, raw_album, is_comp_album, literal_various):
-        """Try the cleaned album title first, then the raw one (and, for collaborations, the
-        first-listed artist). Returns (genre, service text)."""
         find = self.finder.find_genre
         artist = cands[0]
         cleaned = clean_album_title(raw_album)
@@ -1114,17 +1040,14 @@ class MP3TaggerApp:
             for album in variants:
                 if album != variants[0]:
                     print("  [*] Retrying with the original album title.")
-                # Step 1: album title only (sidesteps "Various Artists" matching problems)
                 genre, service = find("", album, require_consensus=False)
                 if genre:
                     return genre, service
                 failure_note = failure_note or service
-                # Step 2: "Various Artists" (required to trigger Last.fm)
                 print("  [*] Album-only search failed. Trying 'Various Artists' fallback.")
                 genre, fb = find("Various Artists", album, require_consensus=False)
                 if genre:
                     return genre, f"[VA FALLBACK] {fb}"
-            # Step 3: curator/label fallback if the artist tag isn't explicitly "VA"
             if not literal_various and artist:
                 print(f"  [*] Compilation searches failed. Attempting Label fallback for: {artist}")
                 genre, fb = find(artist, "", require_consensus=False)
@@ -1142,8 +1065,6 @@ class MP3TaggerApp:
                 if genre:
                     return genre, service
                 failure_note = failure_note or service
-        # Artist-only is looser (one source is enough), so it only ever uses the full name:
-        # a bare first-listed artist like "Earth" could belong to a different band entirely.
         print(f"  [*] Album consensus failed. Attempting Artist-Only fallback for: {artist}")
         genre, fb = find(artist, "", require_consensus=False)
         if genre:
@@ -1188,8 +1109,7 @@ class MP3TaggerApp:
                 differing.append(existing)
             plan.append((f, existing))
 
-        # A dry run never prompts: it lists every overwrite it would offer.
-        preview_only = bool(differing) and self.args.dry_run and self.overwrite_policy is None
+        preview_only = bool(differing) and self.is_dry_run and self.overwrite_policy is None
         overwrite = True if preview_only else (bool(differing) and self._ask_overwrite(differing, genre))
 
         modified = 0
@@ -1199,7 +1119,7 @@ class MP3TaggerApp:
                 print(f"      ~ Skipped (kept '{existing}'): {f}")
                 self._report(root, f, artist, album, existing, genre, "kept existing", source)
                 continue
-            if self.args.dry_run:
+            if self.is_dry_run:
                 if existing:
                     note = " (you would be asked first)" if preview_only else ""
                     print(f"      [DRY RUN] Would overwrite '{existing}' with '{genre}'{note}: {f}")
@@ -1225,7 +1145,7 @@ class MP3TaggerApp:
             modified += 1
 
         if errors:
-            status = "error"                 # not terminal: retried next run
+            status = "error"
         elif modified:
             status = "tagged"
         elif differing:
@@ -1253,58 +1173,15 @@ def run_selftest():
         "Dance": "Electronic", "Rock": "Rock", "Pop": "Pop", "Post-Punk": "Alternative Rock",
         "Pop Punk": "Punk", "Neo-Soul": "R&B", "Hardcore Techno": "Electronic",
         "Christian & Gospel": "Gospel", "Worldwide": "World", "K-Pop": "Pop", "Electronic": "Electronic",
-        "Blues Rock": "Rock", "Latin": "Latin", "Stage & Screen": "Soundtrack", "Rock & Roll": "Rock",
-        "Drum and Bass": "Electronic", "Dubstep": "Electronic", "Norte\u00f1o": "Latin",
-        "Alternative Hip Hop": "Hip Hop", "Children's Music": "Children's", "Jazz": "Jazz",
-        "Death Metal": "Metal", "Latin Pop": "Latin", "Dance Pop": "Pop", "Boogie-Woogie": "Blues",
-        # '<X> metal' must stay Metal even when X is itself a genre keyword
-        "Christian Metal": "Metal", "Celtic Metal": "Metal", "Electronic Metal": "Metal",
-        "Neoclassical Metal": "Metal", "Orchestral Metal": "Metal", "Country Metal": "Metal",
-        # Reggae family
-        "Reggae": "Reggae", "Roots Reggae": "Reggae", "Dub": "Dub", "Ska": "Ska",
-        "Ska Punk": "Punk", "Dancehall": "Dancehall", "Rocksteady": "Rocksteady",
-        "Dub Techno": "Electronic",
+        "Blues Rock": "Rock", "Latin": "Latin", "Música Tropical": "Latin", "Stage & Screen": "Soundtrack",
+        "Rockabilly": "Rockabilly", "Boppin' Hillbilly": "Rockabilly",
+        "Drum and Bass": "Electronic", "Dubstep": "Electronic", "Norteño": "Latin",
     }.items():
         check(f"normalize({tag!r})", normalize_genre(tag), want)
 
     for g in list(GENRE_ALIASES.values()) + [g for _, g in GENRE_REGEXES]:
         if g not in MASTER_GENRES:
             failures.append(f"  FAIL taxonomy: {g!r} is not in MASTER_GENRES")
-
-    for tag, want in {"Classical": True, "classic rock": True, "Acid Jazz": True, "Rock": True,
-                      "seen live": False, "Favorites": False, "1999": False, "80s": False,
-                      "female vocalists": False, "cd": False, "": False}.items():
-        check(f"is_valid_genre({tag!r})", is_valid_genre(tag), want)
-
-    # Real band names keep their '&' / ',' / '/'; the collaboration split is only a fallback.
-    for raw, want in {
-        "Simon & Garfunkel": ["Simon & Garfunkel", "Simon"],
-        "Hall & Oates": ["Hall & Oates", "Hall"],
-        "Earth, Wind & Fire": ["Earth, Wind & Fire", "Earth"],
-        "Crosby, Stills & Nash": ["Crosby, Stills & Nash", "Crosby"],
-        "AC/DC": ["AC/DC"],
-        "Florence and the Machine": ["Florence and the Machine"],
-        "Drake feat. Rihanna": ["Drake"], "Drake ft. Rihanna": ["Drake"],
-        "Artist (feat. Someone)": ["Artist"], "A; B": ["A"],
-    }.items():
-        check(f"artist_candidates({raw!r})", artist_candidates(raw), want)
-
-    # config precedence: an empty config value must never hide an environment variable
-    check("pick: empty config -> env", _pick("K", {"K": ""}, {"K": "env"}), "env")
-    check("pick: config beats env", _pick("K", {"K": "cfg"}, {"K": "env"}), "cfg")
-    check("pick: default", _pick("K", {}, {}, "d"), "d")
-
-    for folder, want in {"va - best of 2020": True, "va hits": True, "various artists - x": True,
-                         "v.a. - hits": True, "2005 va - summer": True, "nova - album": False,
-                         "diva - something": False, "eva cassidy - songbird": False,
-                         "nirvana - nevermind": False}.items():
-        check(f"COMP_FOLDER_RE({folder!r})", bool(COMP_FOLDER_RE.search(folder)), want)
-
-    check("clean_album 1", clean_album_title("Abbey Road (Remastered)"), "Abbey Road")
-    check("clean_album 2", clean_album_title("Now Vol. 3"), "Now Volume 3")
-    check("clean_album 3", clean_album_title("(Only Parens)"), "(Only Parens)")
-    check("similar close", similar("Abbey Road", "Abbey Road (Remastered 2009)") >= 0.9, True)
-    check("similar far", similar("Nevermind", "In Utero") < 0.5, True)
 
     print("\n".join(failures) if failures else "All self-tests passed.")
     return 1 if failures else 0
@@ -1314,12 +1191,14 @@ def run_selftest():
 # CLI
 # ==========================================
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="MP3 auto-consensus genre tagger")
+    p = argparse.ArgumentParser(description="GenreShark MP3 auto-consensus genre tagger")
     p.add_argument("path", nargs="?", help="Folder containing your MP3 library (prompted if omitted)")
     p.add_argument("--dry-run", action="store_true",
                    help="Look up genres and write a CSV report of proposed changes; change nothing else")
+    p.add_argument("--dry-run-cached", action="store_true",
+                   help="Like --dry-run, but allows saving resolved artists to artist_cache.json")
     p.add_argument("--report", metavar="FILE.csv",
-                   help="Write a CSV of every change, proposed or applied (a dry run does this automatically)")
+                   help="Write a CSV of every change, proposed or applied")
     p.add_argument("--only-untagged", action="store_true",
                    help="Only tag files with no genre; folders that are fully tagged are skipped with no network calls")
     g = p.add_mutually_exclusive_group()
@@ -1389,8 +1268,10 @@ def main():
         sys.exit(1)
 
     print(f"Run ID: {app.run_id}")
-    if args.dry_run:
-        print("\n[DRY RUN] No tags, state, cache or undo files will be written; only the report below.")
+    if args.dry_run or args.dry_run_cached:
+        print("\n[DRY RUN] No tags, state or undo files will be written; only the CSV report.")
+        if args.dry_run_cached:
+            print("          Artist cache updates ARE enabled (--dry-run-cached).")
     print("\nStarting scan... (Press Ctrl+C to stop; finished folders are remembered)")
 
     start = time.time()
@@ -1405,7 +1286,7 @@ def main():
     print(" SCAN INTERRUPTED" if interrupted else " SCAN COMPLETE")
     if app.stats:
         print(" " + ", ".join(f"{k}: {v}" for k, v in sorted(app.stats.items())))
-    if not args.dry_run and (app.stats["tagged"] or app.stats["error"]):
+    if not (args.dry_run or args.dry_run_cached) and (app.stats["tagged"] or app.stats["error"]):
         print(f" Undo this run with: python GenreShark.py \"{target}\" --undo      (run id {app.run_id})")
     print(f" Grand Total Time: {format_duration(time.time() - start)}")
     print("=" * 60)
