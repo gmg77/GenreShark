@@ -111,3 +111,7 @@ Edit `GENRE_ALIASES`, `GENRE_REGEXES` and `MASTER_GENRES` near the top of `Genre
 - Requests are throttled per host (Apple documents about 20 iTunes requests per minute), so a first pass over a
   large library takes a while. Later runs use the cache.
 - Genre data is community-sourced. Use `--dry-run` first and review the report.
+
+License
+This project is licensed under the MIT License.
+You are free to use, modify, and distribute this software. Attribution appreciated but not required.
