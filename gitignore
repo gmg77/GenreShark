@@ -1,0 +1,15 @@
+# Your API keys - never commit this file
+config.json
+
+# Files GenreShark writes (normally into your music folder, ignored here just in case)
+tagger_state.jsonl
+tagger_progress.log
+artist_cache.json
+artist_cache.json.tmp
+genre_undo.jsonl
+failed_searches.txt
+genre_dry_run_*.csv
+
+# Python
+__pycache__/
+*.pyc

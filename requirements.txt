@@ -1,0 +1,5 @@
+requests
+musicbrainzngs
+mutagen
+# Optional but recommended: needed for Last.fm without an API key, and for Genius
+beautifulsoup4
