@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Artist Genre Cache Editor</title>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--border:#334155;--text:#f8fafc;--muted:#94a3b8;--accent:#38bdf8;--accent-hover:#0284c7;--success:#22c55e;--warning:#f59e0b;--purple:#a855f7}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:24px}
+.container{max-width:1200px;margin:0 auto}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;padding-bottom:20px;border-bottom:1px solid var(--border);margin-bottom:20px}
+h1{margin:0;font-size:1.5rem}.subtitle{color:var(--muted);font-size:.9rem;margin-top:4px}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;background:var(--panel);padding:16px;border-radius:8px;border:1px solid var(--border);margin-bottom:16px;align-items:center}
+.add-panel{border-left:4px solid var(--accent);background:#172033}
+.bulk{border-left:4px solid var(--purple)}
+.panel-label{font-weight:700;font-size:.9rem;color:var(--accent);margin-right:6px}
+input[type=text],select{background:var(--bg);color:var(--text);border:1px solid var(--border);padding:8px 12px;border-radius:6px;font-size:.9rem}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);border-color:transparent}
+.search-box{flex:1;min-width:200px}
+.checkbox-label{display:inline-flex;align-items:center;gap:5px;font-size:.82rem;color:var(--muted);cursor:pointer;user-select:none}
+button{background:var(--accent);color:#0f172a;font-weight:600;border:none;padding:9px 16px;border-radius:6px;cursor:pointer;font-size:.9rem}
+button:hover:not(:disabled){background:var(--accent-hover);color:#fff}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.secondary{background:#334155;color:var(--text)}button.secondary:hover:not(:disabled){background:#475569}
+button.save-btn{background:var(--success);color:#052e16}button.save-btn:hover:not(:disabled){background:#16a34a}
+button.icon{padding:5px 9px}
+.stats{display:flex;flex-wrap:wrap;gap:16px;font-size:.85rem;color:var(--muted);margin-bottom:12px;justify-content:space-between}
+.table-wrap{background:var(--panel);border-radius:8px;border:1px solid var(--border);overflow:clip}
+table{width:100%;border-collapse:collapse;text-align:left}
+th,td{padding:10px 14px;border-bottom:1px solid var(--border);font-size:.9rem;vertical-align:middle}
+th{background:#0f172a;color:var(--muted);font-weight:600;position:sticky;top:0;z-index:2;user-select:none}
+th.sortable{cursor:pointer;color:var(--accent)}
+td.c,th.c{width:38px;padding-right:0}
+td.act{white-space:nowrap;text-align:right}td.act button{margin-left:4px}
+tr.modified{background:rgba(34,197,94,.08)}tr.newly-added{background:rgba(168,85,247,.12)}
+tr.flash-highlight{animation:pulseRow 2s ease-out}
+@keyframes pulseRow{0%{background:rgba(56,189,248,.45)}100%{background:rgba(168,85,247,.12)}}
+tr:hover{background:rgba(255,255,255,.03)}
+.artist-name{font-size:1.2rem;font-weight:700;letter-spacing:.01em;word-break:break-word;display:flex;align-items:center;gap:8px}
+.new-pill{font-size:.7rem;background:var(--purple);color:#fff;padding:2px 6px;border-radius:4px;font-weight:700}
+td input.g{width:100%;min-width:160px}
+.badge{display:inline-block;padding:4px 8px;border-radius:4px;font-size:.78rem;background:#0f172a;color:var(--muted);border:1px solid var(--border)}
+.badge.fallback{color:var(--warning);border-color:rgba(245,158,11,.4)}
+.badge.edited{color:var(--success);border-color:rgba(34,197,94,.4)}
+.badge.added{color:#d8b4fe;border-color:rgba(168,85,247,.5)}
+.pagination{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:#0f172a}
+.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;width:min(680px,92vw);padding:16px}
+dialog::backdrop{background:#0009}
+.gmrow{display:flex;gap:8px;align-items:center;margin:6px 0}.gmrow input{flex:1}
+#toasts{position:fixed;bottom:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:50}
+.toast{background:#334155;padding:10px 14px;border-radius:6px;display:flex;gap:10px;align-items:center;box-shadow:0 4px 16px #0006;border-left:4px solid var(--accent)}
+.toast.err{border-left-color:#ef4444}
+@media(max-width:820px){.table-wrap{overflow-x:auto}table{min-width:780px}}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+  <div><h1>GenreShark Companion Genre Editor</h1><div class="subtitle" id="fileLabel">Open an artist_cache.json file, drop one anywhere on this page, or start adding artists</div></div>
+  <div class="row">
+    <button id="openBtn">📂 Open</button><input type="file" id="fileInput" accept=".json" hidden>
+    <button class="secondary" id="undoBtn" disabled title="Ctrl/Cmd+Z">↶ Undo</button>
+    <button class="save-btn" id="saveBtn" title="Ctrl/Cmd+S">💾 Save</button>
+    <button class="secondary" id="dlBtn" title="Download a full copy">⬇ Copy</button>
+  </div>
+</header>
+
+<div class="toolbar" id="draftBar" hidden>
+  <span>Unsaved draft of <b id="draftInfo"></b> found.</span>
+  <button id="draftRestore">Restore draft</button><button class="secondary" id="draftDiscard">Discard</button>
+</div>
+
+<div class="toolbar add-panel">
+  <span class="panel-label">Add artist:</span>
+  <input type="text" id="newArtistName" placeholder="Artist name..." aria-label="New artist name" style="flex:1;min-width:180px">
+  <label class="checkbox-label"><input type="checkbox" id="lowercaseToggle" checked> lowercase</label>
+  <input type="text" id="newArtistGenre" list="genreList" placeholder="Genre (pick or type)..." aria-label="Genre for new artist" style="width:200px">
+  <button id="addArtistBtn">+ Add artist</button>
+  <span style="border-left:1px solid var(--border);height:28px"></span>
+  <input type="text" id="newGenreInput" placeholder="New genre only..." aria-label="New genre" style="width:150px">
+  <button class="secondary" id="addGenreBtn">+ Add genre</button>
+  <button class="secondary" id="genresBtn">🏷 Manage genres</button>
+</div>
+
+<div class="toolbar">
+  <input type="text" id="searchInput" class="search-box" placeholder="Search artist, genre or note  ( / )" aria-label="Search">
+  <select id="sortSelect" aria-label="Sort order">
+    <option value="asc">Sort: A → Z (0-9, A-Z)</option>
+    <option value="desc">Sort: Z → A (Z-A, 9-0)</option>
+  </select>
+  <select id="genreFilter" aria-label="Filter by genre"></select>
+  <select id="statusFilter" aria-label="Filter by status">
+    <option value="">All statuses</option>
+    <option value="fallback">Fallback only ([ARTIST FALLBACK])</option>
+    <option value="modified">Modified / added only</option>
+    <option value="added">Newly added only</option>
+    <option value="empty">Missing genre</option>
+  </select>
+</div>
+
+<div class="toolbar bulk" id="bulkBar" hidden>
+  <b id="bulkCount"></b>
+  <input type="text" id="bulkGenre" list="genreList" placeholder="Set genre for selected..." aria-label="Bulk genre" style="width:210px">
+  <button id="bulkApply">Apply genre</button>
+  <button class="secondary" id="bulkAll">Select all matching</button>
+  <button class="secondary" id="bulkDel">Delete selected</button>
+  <button class="secondary" id="bulkClear">Clear selection</button>
+</div>
+
+<div class="stats"><span id="showingCount"></span><span id="modifiedCount"></span></div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th class="c"><input type="checkbox" id="selPage" aria-label="Select all on this page"></th>
+      <th style="width:30%" class="sortable" id="artistHeader" title="Click to toggle sort">Artist <span id="sortIndicator"></span></th>
+      <th style="width:34%">Genre (pick or type, Enter to commit, Esc to cancel)</th>
+      <th style="width:22%">Source / confidence note</th>
+      <th></th>
+    </tr></thead>
+    <tbody id="artistTableBody"></tbody>
+  </table>
+  <div class="pagination">
+    <button class="secondary" id="prevBtn">← Previous 100</button>
+    <span id="pageInfo"></span>
+    <button class="secondary" id="nextBtn">Next 100 →</button>
+  </div>
+</div>
+</div>
+
+<datalist id="genreList"></datalist>
+<dialog id="genreDlg">
+  <div class="gmrow"><b>Genres</b><input type="text" id="dlgFilter" placeholder="Filter genres..." aria-label="Filter genres"><button class="secondary" id="dlgClose">Close</button></div>
+  <div style="color:var(--muted);font-size:.8rem">Edit a name and press Rename. Renaming to an existing genre merges them across all artists.</div>
+  <div id="dlgList" style="max-height:60vh;overflow:auto;margin-top:8px"></div>
+</dialog>
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script>
+// Elements are referenced by id (named globals).
+const PS=100, FB='[ARTIST FALLBACK]', OVR='Manual Override', KEY='genreCacheEditor.draft';
+const col=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
+let data=new Map(), extra=new Set(), del=new Set(), sel=new Set(), keys=[], undo=[];
+let fmt={unit:'  ',eol:'\n',ascii:false,final:true}; // output style, detected from the loaded file
+let meta={version:'1.5'}, topKeys=['version','artists'], page=1, flash=null, fh=null, fname='artist_cache.json', dirty=false, dt;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+const isMod=r=>!r.add&&r.g!==r.og;
+
+/* ---------- toasts ---------- */
+function toast(msg,err,act){
+  const d=document.createElement('div');d.className='toast'+(err?' err':'');d.append(msg);
+  if(act){const b=document.createElement('button');b.className='secondary';b.textContent='Undo';b.onclick=()=>{act();d.remove()};d.append(b)}
+  toasts.append(d);setTimeout(()=>d.remove(),act||err?7000:4000);
+}
+
+/* ---------- genres ---------- */
+function counts(){const c=new Map();for(const g of extra)c.set(g,0);for(const r of data.values())if(r.g)c.set(r.g,(c.get(r.g)||0)+1);return c}
+function genres(){return [...counts()].sort((a,b)=>col.compare(a[0],b[0]))}
+function canon(v){ // trim, collapse spaces, snap to an existing genre case-insensitively
+  v=v.trim().replace(/\s+/g,' ');const l=v.toLowerCase();
+  for(const g of counts().keys())if(g.toLowerCase()===l)return g;return v;
+}
+function populate(){
+  const gs=genres(),cur=genreFilter.value;
+  genreList.innerHTML=gs.map(([g])=>`<option value="${esc(g)}">`).join('');
+  genreFilter.innerHTML=`<option value="">All genres (${gs.length})</option>`+gs.map(([g,n])=>`<option value="${esc(g)}">${esc(g)} (${n})</option>`).join('');
+  genreFilter.value=gs.some(([g])=>g===cur)?cur:'';
+  if(genreDlg.open)renderDlg();
+}
+function setGenre(k,g){const r=data.get(k);r.g=g;if(!r.add)r.n=g===r.og?r.on:OVR}
+
+/* ---------- undo / draft / dirty ---------- */
+function snap(){
+  undo.push({r:[...data].map(([k,r])=>[k,{...r}]),d:new Set(del),e:new Set(extra)});
+  if(undo.length>30)undo.shift();
+  undoBtn.disabled=false;dirty=true;draftSoon();
+}
+function doUndo(){
+  const s=undo.pop();if(!s)return;
+  data=new Map(s.r);del=s.d;extra=s.e;sel.clear();undoBtn.disabled=!undo.length;
+  populate();filt(null,1);bulkUI();draftSoon();
+}
+function draftSoon(){
+  clearTimeout(dt);
+  dt=setTimeout(()=>{try{localStorage.setItem(KEY,JSON.stringify({fname,topKeys,meta,fmt,del:[...del],extra:[...extra],
+    rows:[...data].map(([k,r])=>[k,r.g,r.n,r.og,r.on,+r.add,r.x])}))}catch{}},600);
+}
+function clean(){dirty=false;clearTimeout(dt);try{localStorage.removeItem(KEY)}catch{}}
+function restore(d){
+  fname=d.fname;topKeys=d.topKeys;meta=d.meta;fmt=d.fmt||fmt;del=new Set(d.del);extra=new Set(d.extra);
+  data=new Map(d.rows.map(([k,g,n,og,on,a,x])=>[k,{g,n,og,on,add:!!a,x}]));
+  undo=[];sel.clear();dirty=true;fh=null;undoBtn.disabled=true;label();populate();filt();
+}
+addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+try{const d=JSON.parse(localStorage.getItem(KEY)||'null');
+  if(d&&d.rows){draftBar.hidden=false;draftInfo.textContent=`${d.fname} (${d.rows.length} artists)`;
+    draftRestore.onclick=()=>{restore(d);draftBar.hidden=true};draftDiscard.onclick=()=>{clean();draftBar.hidden=true}}}catch{}
+
+/* ---------- load / save ---------- */
+function label(){fileLabel.textContent=fname+(fh?' · Save writes to this file':' · Save downloads a file')}
+function loadText(txt,name,handle){
+  let p;try{p=JSON.parse(txt)}catch(e){return toast('Invalid JSON: '+e.message,1)}
+  if(!p||typeof p.artists!=='object'||!p.artists||Array.isArray(p.artists))return toast("The file needs an 'artists' object.",1);
+  let bad=0;data=new Map();
+  for(const k of Object.keys(p.artists)){
+    const v=p.artists[k];let g='',n='',x=[];
+    if(Array.isArray(v)&&typeof v[0]==='string'){g=v[0];n=typeof v[1]==='string'?v[1]:'';x=v.slice(2)}else bad++;
+    data.set(k,{g,n,og:g,on:n,add:false,x});
+  }
+  fmt=detectFmt(txt);topKeys=Object.keys(p);meta={...p};delete meta.artists;
+  extra=new Set();del=new Set();sel.clear();undo=[];undoBtn.disabled=true;fname=name;fh=handle||null;
+  clean();label();draftBar.hidden=true;populate();filt();bulkUI();
+  toast(`Loaded ${data.size} artists`+(bad?` · ${bad} malformed entr${bad==1?'y':'ies'} found (shown with an empty genre; filter "Missing genre")`:''),bad);
+}
+async function openFile(){
+  if(window.showOpenFilePicker){
+    try{const [h]=await showOpenFilePicker({types:[{accept:{'application/json':['.json']}}]});const f=await h.getFile();return loadText(await f.text(),f.name,h)}
+    catch(e){if(e.name==='AbortError')return}
+  }
+  fileInput.click();
+}
+openBtn.onclick=openFile;
+fileInput.onchange=async()=>{const f=fileInput.files[0];if(f)loadText(await f.text(),f.name);fileInput.value=''};
+addEventListener('dragover',e=>e.preventDefault());
+addEventListener('drop',async e=>{
+  e.preventDefault();const it=e.dataTransfer.items&&e.dataTransfer.items[0];let h=null,f;
+  if(it&&it.getAsFileSystemHandle){try{h=await it.getAsFileSystemHandle();if(h.kind!=='file')h=null}catch{}}
+  f=h?await h.getFile():e.dataTransfer.files[0];if(f)loadText(await f.text(),f.name,h);
+});
+
+function detectFmt(t){
+  const m=t.match(/\n([ \t]*)"/);
+  return{unit:m?m[1]:'  ',eol:t.includes('\r\n')?'\r\n':'\n',final:/\n$/.test(t),
+    ascii:/\\u[0-9a-fA-F]{4}/.test(t)&&!/[^\x00-\x7F]/.test(t)}; // ascii = Python-style ensure_ascii
+}
+const str=x=>{let s=JSON.stringify(x);if(fmt.ascii&&typeof x==='string')s=s.replace(/[\u0080-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));return s};
+function ser(v,lv){ // like json.dumps(indent=...) using the detected indent and line ending
+  const u=fmt.unit,nl=fmt.eol,p=u.repeat(lv+1),q=u.repeat(lv);
+  if(Array.isArray(v))return v.length?'['+nl+v.map(x=>p+ser(x,lv+1)).join(','+nl)+nl+q+']':'[]';
+  if(v&&typeof v==='object'){const ks=Object.keys(v);return ks.length?'{'+nl+ks.map(k=>p+str(k)+': '+ser(v[k],lv+1)).join(','+nl)+nl+q+'}':'{}'}
+  return str(v);
+}
+function exportText(){
+  const ks=[...data.keys()].sort(col.compare);if(sortSelect.value==='desc')ks.reverse();
+  const u=fmt.unit,nl=fmt.eol;
+  const body=ks.length?'{'+nl+ks.map(k=>{const r=data.get(k);return u+u+str(k)+': '+ser([r.g,r.n,...r.x],2)}).join(','+nl)+nl+u+'}':'{}';
+  const parts=topKeys.map(k=>u+str(k)+': '+(k==='artists'?body:ser(meta[k],1)));
+  if(!topKeys.includes('artists'))parts.push(u+'"artists": '+body);
+  return '{'+nl+parts.join(','+nl)+nl+'}'+(fmt.final?nl:'');
+}
+function download(txt,name){
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));
+  a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+async function save(forceDownload){
+  const txt=exportText();
+  try{
+    if(!forceDownload&&window.showSaveFilePicker){
+      if(!fh){fh=await showSaveFilePicker({suggestedName:fname,types:[{accept:{'application/json':['.json']}}]});fname=fh.name;label()}
+      if(fh.requestPermission)await fh.requestPermission({mode:'readwrite'});
+      const w=await fh.createWritable();await w.write(txt);await w.close();toast('Saved '+fh.name);
+    }else{download(txt,fname);toast('Downloaded '+fname)}
+    clean();
+  }catch(e){
+    if(e.name==='AbortError')return;
+    fh=null;label();download(txt,fname);clean();toast('Could not write in place ('+e.message+'). Downloaded a copy instead.',1);
+  }
+}
+saveBtn.onclick=()=>save();dlBtn.onclick=()=>save(true);
+undoBtn.onclick=doUndo;
+
+/* ---------- filter / render ---------- */
+function filt(jump,keep){
+  const terms=searchInput.value.toLowerCase().split(/\s+/).filter(Boolean),g=genreFilter.value,s=statusFilter.value;
+  keys=[...data.keys()].filter(k=>{
+    const r=data.get(k);
+    if(terms.length){const h=(k+' '+r.g+' '+r.n).toLowerCase();if(!terms.every(t=>h.includes(t)))return false}
+    if(g&&r.g!==g)return false;
+    if(s==='fallback'&&!r.n.includes(FB))return false;
+    if(s==='modified'&&!(r.add||isMod(r)))return false;
+    if(s==='added'&&!r.add)return false;
+    if(s==='empty'&&r.g)return false;
+    return true;
+  });
+  const m=sortSelect.value;
+  if(m==='asc')keys.sort(col.compare);else if(m==='desc')keys.sort((a,b)=>col.compare(b,a));
+  sortIndicator.textContent=m==='asc'?'▲':'▼';
+  if(jump&&keys.includes(jump))page=Math.floor(keys.indexOf(jump)/PS)+1;else if(!keep)page=1;
+  render();
+}
+function rowEl(k){
+  const r=data.get(k),mod=isMod(r),tr=document.createElement('tr');
+  tr.dataset.k=k;tr.className=r.add?'newly-added':mod?'modified':'';
+  if(k===flash){tr.classList.add('flash-highlight');flash=null}
+  tr.innerHTML=`<td class="c"><input type="checkbox" class="sel" aria-label="Select ${esc(k)}" ${sel.has(k)?'checked':''}></td>
+  <td><div class="artist-name">${esc(k)}${r.add?'<span class="new-pill">NEW</span>':''}</div></td>
+  <td><input type="text" class="g" list="genreList" value="${esc(r.g)}" placeholder="Genre..." aria-label="Genre for ${esc(k)}"></td>
+  <td><span class="badge ${r.add?'added':mod?'edited':r.n.includes(FB)?'fallback':''}">${esc(r.n)||'Unknown'}</span></td>
+  <td class="act"><button class="icon secondary" data-a="ren" title="Rename artist" aria-label="Rename ${esc(k)}">✎</button><button class="icon secondary" data-a="rev" title="Revert to original" aria-label="Revert ${esc(k)}" ${mod?'':'disabled'}>↺</button><button class="icon secondary" data-a="del" title="Delete artist" aria-label="Delete ${esc(k)}">✕</button></td>`;
+  return tr;
+}
+function render(){
+  const tp=Math.max(1,Math.ceil(keys.length/PS));page=Math.min(page,tp);
+  const st=(page-1)*PS,items=keys.slice(st,st+PS);
+  artistTableBody.replaceChildren(...(items.length?items.map(rowEl):[Object.assign(document.createElement('tr'),
+    {innerHTML:`<td colspan="5" class="empty-state">${data.size?'No matching artists.':'Open or drop an artist_cache.json, or add an artist above.'}</td>`})]));
+  selPage.checked=items.length>0&&items.every(k=>sel.has(k));
+  stats(st,items.length,tp);
+}
+function stats(st=(page-1)*PS,n=Math.min(PS,Math.max(0,keys.length-st)),tp=Math.max(1,Math.ceil(keys.length/PS))){
+  let mod=0,add=0,rev=0;for(const r of data.values()){if(isMod(r))mod++;if(r.add)add++;if(r.n.includes(FB))rev++}
+  showingCount.textContent=`Showing ${n?st+1:0}–${st+n} of ${keys.length} matching (${data.size} total)`;
+  modifiedCount.textContent=`${mod} modified · ${add} added · ${del.size} deleted · ${rev} fallback to review`;
+  pageInfo.textContent=`Page ${page} of ${tp}`;prevBtn.disabled=page<=1;nextBtn.disabled=page>=tp;
+}
+function refreshRow(k){
+  const tr=[...artistTableBody.children].find(t=>t.dataset.k===k);
+  if(tr)tr.replaceWith(rowEl(k));stats();
+}
+let st;const debounced=()=>{clearTimeout(st);st=setTimeout(()=>{sel.clear();bulkUI();filt()},150)};
+searchInput.oninput=debounced;
+[sortSelect,genreFilter,statusFilter].forEach(e=>e.onchange=()=>{sel.clear();bulkUI();filt()});
+artistHeader.onclick=()=>{sortSelect.value=sortSelect.value==='asc'?'desc':'asc';filt()};
+prevBtn.onclick=()=>{page--;render();scrollTo({top:0,behavior:'smooth'})};
+nextBtn.onclick=()=>{page++;render();scrollTo({top:0,behavior:'smooth'})};
+
+/* ---------- row events (delegated) ---------- */
+const rm=k=>{const r=data.get(k);if(r&&!r.add)del.add(k);data.delete(k);sel.delete(k)};
+// A datalist only shows options matching the current text, so empty the field on focus
+// (the current value moves to the placeholder) and restore it if the user leaves it empty.
+document.addEventListener('focusin',e=>{
+  const t=e.target;if(!t.matches||!t.matches('input[list]'))return;
+  t.dataset.orig=t.value;if(t.classList.contains('g'))t.placeholder=t.value||'Genre...';t.value='';
+});
+function commitGenre(t){
+  if(!t.isConnected)return;
+  const k=t.closest('tr').dataset.k,r=data.get(k);
+  if(!t.value.trim()){t.value=r.g;return}
+  const v=canon(t.value);
+  if(v===r.g){t.value=r.g;return}
+  snap();setGenre(k,v);populate();refreshRow(k);
+}
+document.addEventListener('focusout',e=>{
+  const t=e.target;if(!t.matches||!t.matches('input[list]'))return;
+  if(t.classList.contains('g'))commitGenre(t);
+  else if(!t.value.trim())t.value=t.dataset.orig||'';
+});
+artistTableBody.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&e.target.classList.contains('g')){e.target.value=data.get(e.target.closest('tr').dataset.k).g;e.target.blur()}
+});
+artistTableBody.addEventListener('change',e=>{
+  const t=e.target,tr=t.closest('tr');if(!tr)return;const k=tr.dataset.k;
+  if(t.classList.contains('sel')){t.checked?sel.add(k):sel.delete(k);bulkUI();selPage.checked=keys.slice((page-1)*PS,page*PS).every(x=>sel.has(x))}
+  else if(t.classList.contains('g'))commitGenre(t);
+});
+artistTableBody.addEventListener('click',e=>{
+  const b=e.target.closest('button[data-a]');if(!b)return;
+  const k=b.closest('tr').dataset.k,a=b.dataset.a,r=data.get(k);
+  if(a==='del'){snap();rm(k);populate();filt(null,1);bulkUI();toast(`Deleted "${k}"`,0,doUndo)}
+  else if(a==='rev'){snap();r.g=r.og;r.n=r.on;populate();refreshRow(k)}
+  else if(a==='ren'){
+    let nk=prompt('Rename artist:',k);if(nk==null)return;nk=nk.trim().replace(/\s+/g,' ');
+    if(!nk||nk===k)return;if(data.has(nk))return toast(`"${nk}" already exists.`,1);
+    snap();const m=new Map();
+    for(const [kk,rr] of data){if(kk===k){if(!rr.add)del.add(k);if(del.has(nk))del.delete(nk);m.set(nk,{...rr,add:true})}else m.set(kk,rr)}
+    data=m;sel.delete(k);flash=nk;filt(nk);
+  }
+});
+
+/* ---------- add artist / genre ---------- */
+function addArtist(){
+  let a=newArtistName.value.trim().replace(/\s+/g,' ');
+  if(!a){toast('Enter an artist name.',1);return newArtistName.focus()}
+  if(lowercaseToggle.checked)a=a.toLowerCase();
+  const g=canon(newArtistGenre.value);
+  if(!g){toast('Pick or type a genre.',1);return newArtistGenre.focus()}
+  if(data.has(a)){
+    if(!confirm(`"${a}" already exists with genre "${data.get(a).g}". Update it to "${g}"?`))return;
+    snap();setGenre(a,g);
+  }else{snap();del.delete(a);data.set(a,{g,n:'Manual Entry',og:g,on:'Manual Entry',add:true,x:[]})}
+  newArtistName.value='';newArtistGenre.value=g;
+  searchInput.value='';genreFilter.value='';if(statusFilter.value==='fallback')statusFilter.value='';
+  flash=a;populate();filt(a);newArtistName.focus();
+}
+addArtistBtn.onclick=addArtist;
+[newArtistName,newArtistGenre].forEach(e=>e.onkeydown=ev=>{if(ev.key==='Enter')addArtist()});
+function addGenre(){
+  const g=canon(newGenreInput.value);if(!g)return;
+  if(!counts().has(g)){snap();extra.add(g);populate()}
+  newGenreInput.value='';newArtistGenre.value=g;toast(`Genre "${g}" is available in the dropdowns.`);
+}
+addGenreBtn.onclick=addGenre;newGenreInput.onkeydown=e=>{if(e.key==='Enter')addGenre()};
+
+/* ---------- bulk edit ---------- */
+function bulkUI(){bulkBar.hidden=!sel.size;bulkCount.textContent=sel.size+' selected'}
+selPage.onchange=()=>{keys.slice((page-1)*PS,page*PS).forEach(k=>selPage.checked?sel.add(k):sel.delete(k));bulkUI();render()};
+bulkAll.onclick=()=>{keys.forEach(k=>sel.add(k));bulkUI();render()};
+bulkClear.onclick=()=>{sel.clear();bulkUI();render()};
+bulkApply.onclick=()=>{
+  const g=canon(bulkGenre.value);if(!g)return toast('Pick or type a genre to apply.',1);
+  snap();sel.forEach(k=>setGenre(k,g));populate();filt(null,1);toast(`Set ${sel.size} artists to "${g}"`,0,doUndo);
+};
+bulkDel.onclick=()=>{const n=sel.size;snap();[...sel].forEach(rm);sel.clear();populate();filt(null,1);bulkUI();toast(`Deleted ${n} artists`,0,doUndo)};
+
+/* ---------- genre manager ---------- */
+function renderDlg(){
+  const f=dlgFilter.value.toLowerCase();
+  dlgList.innerHTML=genres().filter(([g])=>g.toLowerCase().includes(f)).map(([g,n])=>
+    `<div class="gmrow" data-g="${esc(g)}"><input type="text" value="${esc(g)}" aria-label="Rename ${esc(g)}"><span class="badge">${n}</span><button data-a="rn">Rename</button><button class="secondary" data-a="show">Show</button></div>`).join('')||'<div class="empty-state">No genres yet.</div>';
+}
+genresBtn.onclick=()=>{renderDlg();genreDlg.showModal()};
+dlgClose.onclick=()=>genreDlg.close();dlgFilter.oninput=renderDlg;
+dlgList.onclick=e=>{
+  const b=e.target.closest('button[data-a]');if(!b)return;
+  const row=b.closest('.gmrow'),g=row.dataset.g;
+  if(b.dataset.a==='show'){genreFilter.value=g;genreDlg.close();filt();return}
+  let t=row.querySelector('input').value.trim().replace(/\s+/g,' ');if(!t)return;
+  if(t.toLowerCase()!==g.toLowerCase())t=canon(t);if(t===g)return;
+  snap();let n=0;
+  for(const [k,r] of data)if(r.g===g){setGenre(k,t);n++}
+  if(extra.delete(g))extra.add(t);
+  populate();filt(null,1);toast(`Renamed "${g}" to "${t}" (${n} artists)`,0,doUndo);
+};
+
+/* ---------- shortcuts ---------- */
+addEventListener('keydown',e=>{
+  const m=e.ctrlKey||e.metaKey,k=e.key.toLowerCase(),typing=/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+  if(m&&k==='s'){e.preventDefault();save()}
+  else if(m&&k==='z'&&!typing){e.preventDefault();doUndo()}
+  else if(e.key==='/'&&!typing){e.preventDefault();searchInput.focus()}
+});
+
+populate();filt();
+</script>
+</body>
+</html>
