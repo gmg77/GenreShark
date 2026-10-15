@@ -102,7 +102,37 @@ Edit `GENRE_ALIASES`, `GENRE_REGEXES` and `MASTER_GENRES` near the top of `Genre
 
 1. Run `python GenreShark.py --selftest`.
 2. Bump `TAXONOMY_VERSION` so finished folders and cached artists are re-evaluated with the new rules.
+Here is the complete list of all **Master Genres** currently supported and managed by GenreShark:
 
+* **Alternative Rock**
+* **Blues**
+* **Children's**
+* **Classical**
+* **Comedy**
+* **Country**
+* **Dancehall**
+* **Dub**
+* **Electronic**
+* **Folk**
+* **Gospel**
+* **Hip Hop**
+* **Holiday**
+* **Jazz**
+* **Latin**
+* **Metal**
+* **Pop**
+* **Punk**
+* **R&B**
+* **Reggae**
+* **Rock**
+* **Rockabilly**
+* **Rocksteady**
+* **Ska**
+* **Soul**
+* **Soundtrack**
+* **World**
+* **New Age**
+  
 ## Limitations
 
 - MP3 (ID3) only.
