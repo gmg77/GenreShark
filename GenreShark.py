@@ -59,7 +59,7 @@ log = logging.getLogger("genretagger")
 # ==========================================
 # CONFIGURATION & API KEYS (config.json, then environment)
 # ==========================================
-__version__ = "2.1.2"
+__version__ = "2.1.3"
 USER_AGENT = f"GenreShark/{__version__}"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -244,7 +244,7 @@ FEAT_SPLIT_RE = re.compile(
     r"\s*[(\[]\s*(?:feat\.?|ft\.?|featuring)\b|\s+(?:feat\.?|ft\.?|featuring)\s+|\s*;\s*",
     re.IGNORECASE,
 )
-COLLAB_SPLIT_RE = re.compile(r"\s+&\s+|,\s+|\s+/\s+")
+COLLAB_SPLIT_RE = re.compile(r"\s+&\s+|,\s+|\s+/\s+Sch")
 
 
 # ==========================================
@@ -752,8 +752,8 @@ class MP3TaggerApp:
         self.cache_file = os.path.join(self.target_dir, "artist_cache.json")
         self.undo_file = os.path.join(self.target_dir, "genre_undo.jsonl")
 
-        # --dry-run-cached allows writing to artist_cache.json even during dry-run
-        self.is_dry_run = args.dry_run
+        # FIX: Ensure both --dry-run and --dry-run-cached treat this as a dry run (no MP3 audio modifications)
+        self.is_dry_run = args.dry_run or args.dry_run_cached
         self.allow_cache_write = args.dry_run or args.dry_run_cached
 
         self.report_path = args.report or (
