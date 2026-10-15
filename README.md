@@ -1,7 +1,7 @@
 # GenreShark
 
 Auto-consensus genre tagger for MP3 libraries. For each album folder it asks up to six music
-databases what genre the release is, lets them vote, maps the winner onto one of 27 standard
+databases what genre the release is, lets them vote, maps the winner onto one of 28 standard
 genres, and writes it to the ID3 genre tag. It can preview everything first (`--dry-run`) and
 roll back any run (`--undo`).
 
