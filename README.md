@@ -19,7 +19,8 @@ any run (`--undo`).
   compilation flag and looked up by album title.
 - **Real band names.** "Hall & Oates", "Earth, Wind & Fire" and "AC/DC" are searched as written;
   the first-listed artist is only a strict-match fallback for collaborations.
-- **Resumable.** Finished folders are remembered, and artist genres are cached between runs. GenreCacheEdit Optional WebApp to configure your genre cache!!
+- **Resumable.** Finished folders are remembered, and artist genres are cached between runs.
+- **GenreCacheEdit** Optional WebApp to configure your genre cache!!
 - **Dry run + CSV report.** See every proposed change before touching a file.
 - **Undo.** Every tag change is logged with the genre it replaced.
 - **Safe writes.** ID3v2.3 files stay v2.3, and files without any tag get one.
