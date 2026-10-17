@@ -1,11 +1,14 @@
 """
-GenreShark - Auto-Consensus MP3 Genre Tagger
+GenreShark - Auto-Consensus Audio Genre Tagger
 ====================================================
-A multi-source genre tagger for local MP3 libraries. Polls Discogs, Last.fm, iTunes,
+A multi-source genre tagger for local audio libraries. Polls Discogs, Last.fm, iTunes,
 TheAudioDB, Genius and MusicBrainz, lets each source vote with its top tags, and
 normalizes sub-genres into clean Master Genres. A genre is only written when at least
 two sources agree (or, for compilations / artist fallbacks, when a single source
 returns a recognised Master Genre).
+
+Supports all major audio formats handled by Mutagen (MP3, FLAC, M4A/MP4, Ogg, Opus,
+WMA/ASF, WAV, AIFF, DSF, WavPack, APE, Musepack, etc.).
 
 Requires Python 3.9+.
 
@@ -34,10 +37,13 @@ from difflib import SequenceMatcher
 try:
     import requests
     import musicbrainzngs
+    import mutagen
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     from mutagen.easyid3 import EasyID3
-    from mutagen.id3 import ID3, TCON, ID3NoHeaderError
+    from mutagen.easymp4 import EasyMP4, EasyMP4Tags
+    from mutagen.id3 import ID3, TCON, ID3NoHeaderError, ID3Tags
+    from mutagen.asf import ASF, ASFUnicodeAttribute
 except ImportError as e:
     module_name = (getattr(e, "name", None) or str(e)).split(".")[0]
     print("=" * 60)
@@ -56,15 +62,31 @@ if sys.platform == 'win32':
 
 log = logging.getLogger("genretagger")
 
+if "compilation" not in EasyID3.valid_keys:
+    EasyID3.RegisterTextKey("compilation", "TCMP")
+
+if "compilation" not in EasyMP4Tags.Get:   # MP4 stores this as the boolean 'cpil' atom
+    EasyMP4Tags.RegisterKey("compilation", getter=lambda mp4, key: ["1"] if mp4.get("cpil") else [])
+
 # ==========================================
 # CONFIGURATION & API KEYS (config.json, then environment)
 # ==========================================
-__version__ = "2.1.3"
+__version__ = "2.2.2"
 USER_AGENT = f"GenreShark/{__version__}"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 CONFIG_KEYS = ("CONTACT_EMAIL", "DISCOGS_TOKEN", "GENIUS_CLIENT_ID",
                "GENIUS_CLIENT_SECRET", "LASTFM_API_KEY")
+
+SUPPORTED_EXTENSIONS = {
+    ".mp3", ".flac", ".ogg", ".oga", ".opus", ".spx",
+    ".m4a", ".m4b", ".m4p", ".mp4",
+    ".wma", ".asf",
+    ".ape", ".wv", ".mpc", ".tta",
+    ".aiff", ".aif", ".aifc", ".wav", ".dsf", ".dff",
+    ".ofr", ".ofs", ".tak",
+}
+MP4_EXTENSIONS = {".m4a", ".m4b", ".m4p", ".mp4"}
 
 
 def load_config(path=CONFIG_PATH):
@@ -124,7 +146,7 @@ RATE_LIMITS = {
     "www.last.fm": 0.5,
     "ws.audioscrobbler.com": 0.25,
     "api.discogs.com": 1.0,      # 60 requests/min when authenticated
-    "itunes.apple.com": 2.0,     # Apple documents roughly 20/min; raise if you see HTTP 403
+    "itunes.apple.com": 3.0,     # Apple documents roughly 20/min (~3.0s interval)
     "api.genius.com": 0.5,
     "genius.com": 1.0,
 }
@@ -164,18 +186,19 @@ GENRE_ALIASES = {
 GENRE_REGEXES = [
     (_alt("rap", "hip ?hop", "boom bap", "lo ?fi hip ?hop", "trap", "grime", "drill", "crunk",
           "turntablism", "g ?funk", "cloud rap", "mumble rap", "chopped and screwed",
-          "conscious hip ?hop", "abstract hip ?hop", "alternative hip ?hop"), "Hip Hop"),
+          "conscious hip ?hop", "abstract hip ?hop", "alternative hip ?hop",
+          "hardcore hip ?hop", "hardcore rap", "jazz rap", "jazz hip ?hop", "country rap"), "Hip Hop"),
     (_alt("r&b", "rhythm and blues", "neo ?soul", "quiet storm", "new jack swing", "r&b soul",
           "soul r&b", "alternative r&b", "contemporary r&b"), "R&B"),
     (_alt("funk", "soul", "motown", "disco", "doo ?wop", "p ?funk", "boogie", "memphis soul",
-          "classic soul", "northern soul"), "Soul"),
+          "classic soul", "northern soul", "psychedelic soul"), "Soul"),
     (_alt("alt(?:ernative)? rock", "indie rock", "grunge", "shoegaze", "post ?rock", "britpop",
           "math rock", "noise rock", "slowcore", "post ?punk", "dream pop", "goth rock",
           "gothic rock"), "Alternative Rock"),
     (_alt("rock ?(?:&|and|n) ?roll", "classic rock", "hard rock", "prog(?:ressive)? rock",
           "psych(?:edelic)? rock", "blues rock", "surf rock", "arena rock", "soft rock",
           "heartland rock", "yacht rock", "southern rock", "rap rock", "funk rock",
-          "pop rock"), "Rock"),
+          "pop rock", "country rock"), "Rock"),
     (_alt("techno", "house", "trance", "dubstep", "idm", "drum ?(?:and|n|&) ?bass", "dnb", "jungle",
           "ambient", "synth ?wave", "chillout", "electronic", "electro", "breakbeat", "downtempo",
           "trip ?hop", "uk garage", "chill ?wave", "vaporwave", "hardstyle", "gabber", "ebm",
@@ -184,7 +207,8 @@ GENRE_REGEXES = [
     (_alt(r"(?:\w+ )?metal", "metalcore", "djent", "grindcore", "deathcore"), "Metal"),
     (_alt("post ?hardcore", "hardcore", "screamo", "punk rock", "pop punk", "skate punk",
           "garage punk", "emo", "crust", "psychobilly", "riot grrrl", "ska punk",
-          "anarcho ?punk", "punk"), "Punk"),
+          "anarcho ?punk", "folk punk", "punk blues", "blues punk", "gypsy punk",
+          "synth ?punk", "dance punk", "punk"), "Punk"),
     (_alt("rockabilly", "boppin hillbilly", "hillbilly bop"), "Rockabilly"),
     (_alt("reggae", "roots reggae", "lovers rock", "reggae fusion"), "Reggae"),
     (_alt("ska", "2 tone", "two tone", "traditional ska"), "Ska"),
@@ -193,7 +217,7 @@ GENRE_REGEXES = [
     (_alt("rocksteady"), "Rocksteady"),
     (_alt("indie pop", "synth ?pop", "electro ?pop", "k ?pop", "j ?pop", "dance pop", "art pop",
           "chamber pop", "hyper ?pop", "bubblegum pop", "city pop", "sophisti ?pop", "power pop",
-          "baroque pop", "teen pop"), "Pop"),
+          "baroque pop", "teen pop", "country pop"), "Pop"),
     (_alt("bluegrass", "americana", "country", "honky tonk", "alt country", "alternative country",
           "outlaw country", "nashville sound"), "Country"),
     (_alt("jazz", "bebop", "swing", "bossa nova", "hard bop", "free jazz", "jazz fusion",
@@ -203,7 +227,8 @@ GENRE_REGEXES = [
     (_alt("delta blues", "chicago blues", "electric blues", "piedmont blues", "jump blues",
           "boogie woogie", "blues"), "Blues"),
     (_alt("reggaeton", "salsa", "bachata", "cumbia", "merengue", "tejano", "latin pop", "norteno",
-          "mariachi", "tango", "ranchera", "latin rock", "rumba", "latino", "música tropical", "musica tropical"), "Latin"),
+          "mariachi", "tango", "ranchera", "latin rock", "latin jazz", "rumba", "latino",
+          "música tropical", "musica tropical"), "Latin"),
     (_alt("classical", "neo ?classical", "baroque", "choral", "orchestral", "symphony", "opera",
           "chamber music", "chamber orchestra", "modern classical", "contemporary classical",
           "minimalist", "romantic era"), "Classical"),
@@ -229,8 +254,9 @@ MASTER_GENRES = {
 INVALID_TAG_RE = re.compile(
     r"\b(?:seen live|favou?rites?|awesome|vinyl|cd|cassette|mp3|download|owned|albums? i own|"
     r"my library|buy|1001 albums|best of|collection|masterpiece|non music|non-music|"
-    r"(?:fe)?male vocalists?|spotify|various(?: artists)?|literature|screen|release calendar|"
-    r"in english|history|biography|essay|enlightenment|science fiction|television|script)\b",
+    r"(?:fe)?male vocalists?|spotify|various(?: artists)?|literature|release calendar|"
+    r"in english|history|biography|essay|enlightenment|science fiction|television|script|"
+    r"folk,? world,? (?:&|and) country)\b",
     re.IGNORECASE
 )
 DECADE_OR_YEAR_RE = re.compile(r"(?:\d{2}|\d{4})s?")
@@ -244,11 +270,11 @@ FEAT_SPLIT_RE = re.compile(
     r"\s*[(\[]\s*(?:feat\.?|ft\.?|featuring)\b|\s+(?:feat\.?|ft\.?|featuring)\s+|\s*;\s*",
     re.IGNORECASE,
 )
-COLLAB_SPLIT_RE = re.compile(r"\s+&\s+|,\s+|\s+/\s+Sch")
+COLLAB_SPLIT_RE = re.compile(r"\s+&\s+|,\s+|\s+/\s+")
 
 
 # ==========================================
-# PURE HELPERS
+# PURE HELPERS & MULTI-FORMAT TAG I/O
 # ==========================================
 def strip_accents(text):
     return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c))
@@ -287,14 +313,14 @@ def is_various(name):
     return bool(name) and name.strip().lower() in VARIOUS_ARTISTS
 
 
+def is_supported_audio(filename):
+    return os.path.splitext(filename)[1].lower() in SUPPORTED_EXTENSIONS
+
+
 def artist_candidates(raw_artist):
     base = FEAT_SPLIT_RE.split(raw_artist)[0].strip() or raw_artist.strip()
     first = COLLAB_SPLIT_RE.split(base)[0].strip()
     return [base] + ([first] if first and first != base else [])
-
-
-def primary_artist_of(raw_artist):
-    return artist_candidates(raw_artist)[0]
 
 
 def clean_album_title(raw):
@@ -315,12 +341,15 @@ def _sim_norm(text):
     return t[4:] if t.startswith("the ") else t
 
 
-def similar(a, b):
+def similar(a, b, allow_substring=False):
     na, nb = _sim_norm(a or ""), _sim_norm(b or "")
     if not na or not nb:
         return 0.0
+    da, db = re.findall(r"\d+", na), re.findall(r"\d+", nb)
+    if (da or db) and da != db:
+        return min(SequenceMatcher(None, na, nb).ratio(), 0.6)
     ratio = SequenceMatcher(None, na, nb).ratio()
-    if min(len(na), len(nb)) >= 6 and (na in nb or nb in na):
+    if allow_substring and min(len(na), len(nb)) >= 6 and (na in nb or nb in na):
         ratio = max(ratio, 0.9)
     return ratio
 
@@ -332,38 +361,183 @@ def _id3_major(path):
 
 
 def _genre_frames(tags):
-    return [t for t in tags["TCON"].text if t] if "TCON" in tags else None
+    return [str(t) for t in tags["TCON"].text if t] if "TCON" in tags else None
+
+
+def _open_audio_tags(path):
+    """Open an audio file with Mutagen using the best interface for its format."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".mp3":
+        return EasyID3(path)   # raises ID3NoHeaderError when untagged; callers handle it
+    if ext in MP4_EXTENSIONS:
+        return EasyMP4(path)
+    audio = mutagen.File(path, easy=True)
+    if audio is not None:
+        return audio
+    return mutagen.File(path)
+
+
+def _extract_tag_list(audio, key):
+    """Return a list of string values for a given canonical key ('artist', 'genre', etc.) across any Mutagen type."""
+    if getattr(audio, "tags", None) is None and not isinstance(audio, (EasyID3, EasyMP4)):
+        return []
+
+    # 1. ASF / WMA
+    if isinstance(audio, ASF):
+        asf_map = {
+            "artist": "Author",
+            "albumartist": "WM/AlbumArtist",
+            "album": "WM/AlbumTitle",
+            "compilation": "WM/IsCompilation",
+            "genre": "WM/Genre",
+        }
+        k = asf_map.get(key)
+        vals = audio.tags.get(k, []) if k and audio.tags else []
+        return [str(v.value if hasattr(v, "value") else v).strip() for v in vals if str(v).strip()]
+
+    # 2. Native ID3 containers (AIFF, WAV, DSF, etc. when not wrapped in EasyID3)
+    tags_obj = getattr(audio, "tags", None)
+    if isinstance(tags_obj, (ID3, ID3Tags)):
+        id3_map = {
+            "artist": "TPE1",
+            "albumartist": "TPE2",
+            "album": "TALB",
+            "compilation": "TCMP",
+            "genre": "TCON",
+        }
+        frame_id = id3_map.get(key)
+        if frame_id and frame_id in tags_obj:
+            frame = tags_obj[frame_id]
+            return [str(t).strip() for t in getattr(frame, "text", [frame]) if str(t).strip()]
+        return []
+
+    # 3. Easy* interfaces, VorbisComments (FLAC, Ogg, Opus), APEv2 (WavPack, Musepack, APE)
+    try:
+        raw = audio.get(key)
+    except Exception:
+        raw = None
+    if not raw:
+        return []
+    if isinstance(raw, (str, int, bool)):
+        raw = [raw]
+    out = []
+    for item in raw:
+        if isinstance(item, bool):
+            out.append("1" if item else "0")
+        else:
+            s = str(item).strip()
+            if s:
+                out.append(s)
+    return out
+
+
+def read_audio_tags(path):
+    """Read TAG_KEYS from any Mutagen-supported audio file. Returns dict or None if unreadable."""
+    try:
+        audio = _open_audio_tags(path)
+    except ID3NoHeaderError:
+        return dict.fromkeys(TAG_KEYS, "")
+    except Exception as exc:
+        log.debug("Cannot read %s: %s", path, exc)
+        return None
+    if audio is None:
+        return None
+
+    result = {}
+    for k in TAG_KEYS:
+        vals = _extract_tag_list(audio, k)
+        val = vals[0] if vals else ""
+        if k == "compilation" and val.lower() in ("true", "1"):
+            val = "1"
+        result[k] = val
+    return result
 
 
 def write_genre(path, genre):
-    major = _id3_major(path)
-    try:
-        tags = ID3(path)
-    except ID3NoHeaderError:
-        tags = ID3()
-    previous = _genre_frames(tags)
-    encoding = 3 if major == 4 else 1
-    tags.setall("TCON", [TCON(encoding=encoding, text=[genre])])
-    tags.save(path, v2_version=major)
-    return previous or None
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".mp3":
+        major = _id3_major(path)
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        previous = _genre_frames(tags)
+        encoding = 3 if major == 4 else 1
+        tags.setall("TCON", [TCON(encoding=encoding, text=[genre])])
+        tags.save(path, v2_version=major)
+        return previous or None
+
+    audio = _open_audio_tags(path)
+    if audio is None:
+        raise ValueError("Unsupported or unreadable audio format")
+
+    previous = _extract_tag_list(audio, "genre") or None
+    if getattr(audio, "tags", None) is None and not isinstance(audio, (EasyID3, EasyMP4)):
+        audio.add_tags()
+
+    if isinstance(audio, ASF):
+        audio.tags["WM/Genre"] = [ASFUnicodeAttribute(genre)]
+    elif isinstance(getattr(audio, "tags", None), (ID3, ID3Tags)):
+        audio.tags.delall("TCON")
+        audio.tags.add(TCON(encoding=3, text=[genre]))
+    else:
+        audio["genre"] = [genre]
+
+    audio.save()
+    return previous
 
 
 def restore_genre(path, old, expected, force=False, dry_run=False):
     if not os.path.exists(path):
         return "missing"
-    major = _id3_major(path)
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".mp3":
+        major = _id3_major(path)
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        if not force and _genre_frames(tags) != [expected]:
+            return "changed"
+        if not dry_run:
+            if old:
+                tags.setall("TCON", [TCON(encoding=3 if major == 4 else 1, text=list(old))])
+            else:
+                tags.delall("TCON")
+            tags.save(path, v2_version=major)
+        return "restored"
+
     try:
-        tags = ID3(path)
-    except ID3NoHeaderError:
-        tags = ID3()
-    if not force and _genre_frames(tags) != [expected]:
+        audio = _open_audio_tags(path)
+    except Exception:
+        return "missing"
+    if audio is None:
+        return "missing"
+
+    current = _extract_tag_list(audio, "genre") or None
+    if not force and current != [expected]:
         return "changed"
+
     if not dry_run:
-        if old:
-            tags.setall("TCON", [TCON(encoding=3 if major == 4 else 1, text=list(old))])
+        if getattr(audio, "tags", None) is None and not isinstance(audio, (EasyID3, EasyMP4)):
+            audio.add_tags()
+
+        if isinstance(audio, ASF):
+            if old:
+                audio.tags["WM/Genre"] = [ASFUnicodeAttribute(g) for g in old]
+            elif "WM/Genre" in audio.tags:
+                del audio.tags["WM/Genre"]
+        elif isinstance(getattr(audio, "tags", None), (ID3, ID3Tags)):
+            audio.tags.delall("TCON")
+            if old:
+                audio.tags.add(TCON(encoding=3, text=list(old)))
         else:
-            tags.delall("TCON")
-        tags.save(path, v2_version=major)
+            if old:
+                audio["genre"] = list(old)
+            elif "genre" in audio:
+                del audio["genre"]
+        audio.save()
     return "restored"
 
 
@@ -425,7 +599,8 @@ class HostThrottle:
 class GenreFinder:
     def __init__(self, services=None):
         self.session = requests.Session()
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504],
+                      respect_retry_after_header=False)
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
@@ -435,6 +610,7 @@ class GenreFinder:
         self._tls = threading.local()
         self._genius_token = None
         self._genius_token_tried = False
+        self.failed_queries = set()   # in-memory negative cache for (artist, album, require_consensus, min_sim)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
 
         all_services = [
@@ -469,6 +645,10 @@ class GenreFinder:
     @last_error.setter
     def last_error(self, value):
         self._tls.last_error = value
+
+    def _artist_threshold(self, default=0.7):
+        override = getattr(self._tls, "min_artist_sim", None)
+        return max(default, override) if override is not None else default
 
     def _get_genius_token(self):
         if self._genius_token_tried:
@@ -521,9 +701,10 @@ class GenreFinder:
     def search_theaudiodb(self, artist, album):
         if not artist or is_various(artist):
             return []
+        min_sim = self._artist_threshold(0.85)
         data = self._fetch("https://www.theaudiodb.com/api/v1/json/123/search.php", params={"s": artist})
         for a in (data or {}).get("artists") or []:
-            if similar(a.get("strArtist", ""), artist) >= 0.85:
+            if similar(a.get("strArtist", ""), artist) >= min_sim:
                 return self._valid([a.get("strGenre"), a.get("strStyle")])
         return []
 
@@ -555,6 +736,7 @@ class GenreFinder:
     def search_discogs(self, artist, album):
         if not DISCOGS_TOKEN or not (artist or album):
             return []
+        min_sim = self._artist_threshold(0.7)
         headers = {"User-Agent": USER_AGENT, "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
         params = {"type": "release", "per_page": 5}
         if album:
@@ -568,39 +750,40 @@ class GenreFinder:
 
         if album:
             for r in results:
-                if self._discogs_matches(r.get("title", ""), artist, album):
+                if self._discogs_matches(r.get("title", ""), artist, album, min_sim=min_sim):
                     tags = tags_of(r)
                     if tags:
                         return tags
             return []
         counts = Counter()
         for r in results:
-            if self._discogs_matches(r.get("title", ""), artist, None):
+            if self._discogs_matches(r.get("title", ""), artist, None, min_sim=min_sim):
                 counts.update(tags_of(r))
         return [t for t, _ in counts.most_common(5)]
 
     @staticmethod
-    def _discogs_matches(title, artist, album):
+    def _discogs_matches(title, artist, album, min_sim=0.7):
         artist_part, sep, album_part = title.partition(" - ")
         if not sep:
             artist_part, album_part = "", title
         artist_part = re.sub(r"\s*\(\d+\)$", "", artist_part)
-        if artist and not is_various(artist) and artist_part and similar(artist_part, artist) < 0.7:
+        if artist and not is_various(artist) and artist_part and similar(artist_part, artist) < min_sim:
             return False
-        return album is None or similar(album_part, album) >= 0.7
+        return album is None or similar(album_part, album, allow_substring=True) >= 0.7
 
     def search_itunes(self, artist, album):
         query = f"{artist} {album}".strip()
         if not query:
             return []
+        min_sim = self._artist_threshold(0.7 if album else 0.85)
         params = {"term": query, "media": "music", "entity": "album" if album else "musicArtist", "limit": 5}
         for r in (self._fetch("https://itunes.apple.com/search", params=params) or {}).get("results") or []:
             if album:
-                if similar(r.get("collectionName", ""), album) < 0.7:
+                if similar(r.get("collectionName", ""), album, allow_substring=True) < 0.7:
                     continue
-                if artist and not is_various(artist) and similar(r.get("artistName", ""), artist) < 0.7:
+                if artist and not is_various(artist) and similar(r.get("artistName", ""), artist) < min_sim:
                     continue
-            elif similar(r.get("artistName", ""), artist) < 0.85:
+            elif similar(r.get("artistName", ""), artist) < min_sim:
                 continue
             tags = self._valid([r.get("primaryGenreName")])
             if tags:
@@ -610,15 +793,22 @@ class GenreFinder:
     def search_musicbrainz(self, artist, album):
         try:
             if album:
+                min_sim = self._artist_threshold(0.7)
                 kwargs = {"release": album, "limit": 5}
                 if artist:
                     kwargs["artist"] = artist
+                seen_rg = set()
                 for rel in musicbrainzngs.search_releases(**kwargs).get('release-list', []):
-                    if int(rel.get('ext:score', 0)) < MB_MIN_SCORE or similar(rel.get('title', ''), album) < 0.7:
+                    if int(rel.get('ext:score', 0)) < MB_MIN_SCORE or similar(rel.get('title', ''), album, allow_substring=True) < 0.7:
                         continue
+                    if artist and not is_various(artist):
+                        credit = rel.get('artist-credit-phrase', '')
+                        if credit and similar(credit, artist) < min_sim:
+                            continue
                     rg_id = (rel.get('release-group') or {}).get('id')
-                    if not rg_id:
+                    if not rg_id or rg_id in seen_rg:
                         continue
+                    seen_rg.add(rg_id)
                     rg = musicbrainzngs.get_release_group_by_id(rg_id, includes=["tags"]).get('release-group', {})
                     tags = self._by_count(rg.get('tag-list', []))
                     if tags:
@@ -626,8 +816,9 @@ class GenreFinder:
                 return []
             if not artist:
                 return []
+            min_sim = self._artist_threshold(0.85)
             for art in musicbrainzngs.search_artists(artist=artist, limit=3).get('artist-list', []):
-                if int(art.get('ext:score', 0)) >= MB_MIN_SCORE and similar(art.get('name', ''), artist) >= 0.85:
+                if int(art.get('ext:score', 0)) >= MB_MIN_SCORE and similar(art.get('name', ''), artist) >= min_sim:
                     tags = self._by_count(art.get('tag-list', []))
                     if tags:
                         return tags
@@ -646,12 +837,13 @@ class GenreFinder:
         token = self._get_genius_token()
         if not token:
             return []
+        min_sim = self._artist_threshold(0.7)
         data = self._fetch("https://api.genius.com/search", params={"q": f"{artist} {album}".strip()},
                            headers={"Authorization": f"Bearer {token}"})
-        for hit in ((data or {}).get("response") or {}).get("hits", [])[:5]:
+        for hit in ((data or {}).get("response") or {}).get("hits", [])[:2]:
             result = hit.get("result") or {}
             if artist and not is_various(artist):
-                if similar((result.get("primary_artist") or {}).get("name", ""), artist) < 0.7:
+                if similar((result.get("primary_artist") or {}).get("name", ""), artist) < min_sim:
                     continue
             url = result.get("url")
             if not url:
@@ -665,8 +857,9 @@ class GenreFinder:
                 return tags
         return []
 
-    def _poll_worker(self, name, func, artist, album):
+    def _poll_worker(self, name, func, artist, album, min_artist_sim=None):
         self.last_error = None
+        self._tls.min_artist_sim = min_artist_sim
         start = time.time()
         try:
             tags = func(artist, album)
@@ -676,13 +869,44 @@ class GenreFinder:
             log.debug("%s error: %s", name, exc)
         return name, tags, time.time() - start, self.last_error
 
-    def find_genre(self, artist, album, require_consensus=True):
+    def find_genre(self, artist, album, require_consensus=True, min_artist_sim=None):
+        neg_key = (artist.casefold(), album.casefold(), require_consensus, min_artist_sim)
+        if neg_key in self.failed_queries:
+            return None, "Cached negative lookup | Stats: skipped (previously failed in this run)"
+
         score, support = {}, {}
-        poll_stats, rejected = [], []
+        poll_stats, rejected, errored = [], [], []
         order = {name: i for i, (name, _) in enumerate(self.services)}
 
         def best_of(candidates):
-            return max(candidates, key=lambda g: (score[g], -min(order[n] for n in support[g])))
+            return max(
+                candidates,
+                key=lambda g: (score[g], len(support[g]), -min(order[n] for n in support[g]), g),
+            )
+
+        def record_result(name, tags, elapsed, err):
+            genres = []
+            for tag in tags:
+                g = normalize_genre(tag)
+                if g in MASTER_GENRES or ALLOW_UNMAPPED:
+                    if g not in genres:
+                        genres.append(g)
+                else:
+                    rejected.append(tag)
+            genres = genres[:3]
+            for rank, g in enumerate(genres):
+                score[g] = score.get(g, 0.0) + 1.0 / (rank + 1)
+                support.setdefault(g, set()).add(name)
+
+            if genres:
+                poll_stats.append(f"{name}[{elapsed:.1f}s]={'/'.join(tags[:3])}->{'/'.join(genres)}")
+            elif err:
+                errored.append(name)
+                poll_stats.append(f"{name}[{elapsed:.1f}s]=ERROR({err})")
+            elif tags:
+                poll_stats.append(f"{name}[{elapsed:.1f}s]=unmapped({'/'.join(tags[:2])})")
+            else:
+                poll_stats.append(f"{name}[{elapsed:.1f}s]=None")
 
         batches = [[s for s in self.services if s[0] in FAST_SERVICES],
                    [s for s in self.services if s[0] not in FAST_SERVICES]]
@@ -690,32 +914,19 @@ class GenreFinder:
             if not batch:
                 continue
             print(f"  [>] Polling {', '.join(n for n, _ in batch)} in parallel...")
-            futures = [self.executor.submit(self._poll_worker, n, f, artist, album) for n, f in batch]
+            futures = [self.executor.submit(self._poll_worker, n, f, artist, album, min_artist_sim) for n, f in batch]
+            processed_futures = set()
             try:
                 for future in concurrent.futures.as_completed(futures):
-                    name, tags, elapsed, err = future.result()
+                    if future not in processed_futures:
+                        processed_futures.add(future)
+                        record_result(*future.result())
 
-                    genres = []
-                    for tag in tags:
-                        g = normalize_genre(tag)
-                        if g in MASTER_GENRES or ALLOW_UNMAPPED:
-                            if g not in genres:
-                                genres.append(g)
-                        else:
-                            rejected.append(tag)
-                    genres = genres[:3]
-                    for rank, g in enumerate(genres):
-                        score[g] = score.get(g, 0.0) + 1.0 / (rank + 1)
-                        support.setdefault(g, set()).add(name)
-
-                    if genres:
-                        poll_stats.append(f"{name}[{elapsed:.1f}s]={'/'.join(tags[:3])}->{'/'.join(genres)}")
-                    elif err:
-                        poll_stats.append(f"{name}[{elapsed:.1f}s]=ERROR({err})")
-                    elif tags:
-                        poll_stats.append(f"{name}[{elapsed:.1f}s]=unmapped({'/'.join(tags[:2])})")
-                    else:
-                        poll_stats.append(f"{name}[{elapsed:.1f}s]=None")
+                    # Drain any other futures that have already finished so tie-breaking is deterministic
+                    for other in futures:
+                        if other not in processed_futures and other.done():
+                            processed_futures.add(other)
+                            record_result(*other.result())
 
                     agreed = [g for g in score if len(support[g]) >= 2]
                     if agreed:
@@ -727,10 +938,14 @@ class GenreFinder:
 
         stats = f"Stats: {', '.join(poll_stats)}"
         if not score:
+            if not errored:   # never cache a failure that may just be a network blip
+                self.failed_queries.add(neg_key)
             note = f"Rejected Unmapped Tags {rejected} | " if rejected else ""
             return None, f"{note}{stats}"
         best = best_of(list(score))
         if require_consensus:
+            if not errored:
+                self.failed_queries.add(neg_key)
             return None, f"No Consensus (best '{best}' had 1 source) | {stats}"
         return best, f"Single-source ({', '.join(sorted(support[best]))}) | {stats}"
 
@@ -752,9 +967,8 @@ class MP3TaggerApp:
         self.cache_file = os.path.join(self.target_dir, "artist_cache.json")
         self.undo_file = os.path.join(self.target_dir, "genre_undo.jsonl")
 
-        # FIX: Ensure both --dry-run and --dry-run-cached treat this as a dry run (no MP3 audio modifications)
         self.is_dry_run = args.dry_run or args.dry_run_cached
-        self.allow_cache_write = args.dry_run or args.dry_run_cached
+        self.allow_cache_write = not args.dry_run
 
         self.report_path = args.report or (
             os.path.join(self.target_dir, f"genre_dry_run_{self.run_id}.csv") if (args.dry_run or args.dry_run_cached) else None)
@@ -933,23 +1147,6 @@ class MP3TaggerApp:
             self._report_file = self._report_writer = None
 
     @staticmethod
-    def _clean_tag(audio, key):
-        try:
-            return str(audio.get(key, [''])[0]).strip()
-        except Exception:
-            return ""
-
-    def _read_tags(self, path):
-        try:
-            audio = EasyID3(path)
-        except ID3NoHeaderError:
-            return dict.fromkeys(TAG_KEYS, "")
-        except Exception as exc:
-            log.debug("Cannot read %s: %s", path, exc)
-            return None
-        return {k: self._clean_tag(audio, k) for k in TAG_KEYS}
-
-    @staticmethod
     def _folder_identity(root, readable):
         is_comp = bool(COMP_FOLDER_RE.search(os.path.basename(root).lower()))
         artist = album = ""
@@ -969,23 +1166,23 @@ class MP3TaggerApp:
                 dirs.sort()
                 if self._key(root) in self.processed:
                     continue
-                mp3s = sorted(f for f in files if f.lower().endswith('.mp3'))
-                if mp3s:
-                    self._process_folder(root, mp3s)
+                audio_files = sorted(f for f in files if is_supported_audio(f))
+                if audio_files:
+                    self._process_folder(root, audio_files)
         finally:
             if self.finder:
                 self.finder.close()
             self._save_cache()
             self._close_report()
 
-    def _process_folder(self, root, mp3s):
+    def _process_folder(self, root, audio_files):
         print(f"\n[SCAN] {root}")
         start = time.time()
 
-        tags_by_file = {f: self._read_tags(os.path.join(root, f)) for f in mp3s}
+        tags_by_file = {f: read_audio_tags(os.path.join(root, f)) for f in audio_files}
         readable = [t for t in tags_by_file.values() if t is not None]
         if not readable:
-            print("  [-] Skipped: no readable MP3 files.")
+            print("  [-] Skipped: no readable audio files.")
             self.stats["skipped"] += 1
             return
 
@@ -1025,7 +1222,7 @@ class MP3TaggerApp:
 
         source = service.split(" | Stats:")[0]
         print(f"  \033[92m[SUCCESS]\033[0m Found Genre: {genre} [{source}]")
-        self._apply_genre(root, mp3s, tags_by_file, genre, service, elapsed, raw_artist, raw_album)
+        self._apply_genre(root, audio_files, tags_by_file, genre, service, elapsed, raw_artist, raw_album)
 
     def _lookup(self, cands, raw_album, is_comp_album, literal_various):
         find = self.finder.find_genre
@@ -1056,12 +1253,14 @@ class MP3TaggerApp:
             return None, failure_note
 
         for cand in cands:
+            is_split_cand = cand != cands[0]
+            min_sim = 0.95 if is_split_cand else None
             for album in variants:
-                if cand != cands[0]:
-                    print(f"  [*] Retrying with first-listed artist: {cand}")
+                if is_split_cand and album == variants[0]:
+                    print(f"  [*] Retrying with first-listed artist (strict match >=0.95): {cand}")
                 elif album != variants[0]:
                     print("  [*] Retrying with the original album title.")
-                genre, service = find(cand, album, require_consensus=True)
+                genre, service = find(cand, album, require_consensus=True, min_artist_sim=min_sim)
                 if genre:
                     return genre, service
                 failure_note = failure_note or service
@@ -1089,10 +1288,10 @@ class MP3TaggerApp:
             return False
         return ans in ("y", "yes")
 
-    def _apply_genre(self, root, mp3s, tags_by_file, genre, service, elapsed, artist, album):
+    def _apply_genre(self, root, audio_files, tags_by_file, genre, service, elapsed, artist, album):
         source = service.split(" | Stats:")[0]
         plan, differing, errors = [], [], 0
-        for f in mp3s:
+        for f in audio_files:
             tags = tags_by_file[f]
             if tags is None:
                 print(f"      ! Unreadable, skipped: {f}")
@@ -1176,8 +1375,20 @@ def run_selftest():
         "Blues Rock": "Rock", "Latin": "Latin", "Música Tropical": "Latin", "Stage & Screen": "Soundtrack",
         "Rockabilly": "Rockabilly", "Boppin' Hillbilly": "Rockabilly",
         "Drum and Bass": "Electronic", "Dubstep": "Electronic", "Norteño": "Latin",
+        "Hardcore Hip Hop": "Hip Hop", "Jazz Rap": "Hip Hop", "Folk Punk": "Punk",
     }.items():
+        check(f"is_valid_genre({tag!r})", is_valid_genre(tag), True)
         check(f"normalize({tag!r})", normalize_genre(tag), want)
+
+    for invalid_tag in ("seen live", "Favorites", "1990s", "80s", "albums i own"):
+        check(f"is_valid_genre({invalid_tag!r})", is_valid_genre(invalid_tag), False)
+
+    # Artist vs Album substring & digit checks
+    check("similar('Prince', 'Prince Royce') < 0.85", similar("Prince", "Prince Royce") < 0.85, True)
+    check("similar('Abbey Road', 'Abbey Road Deluxe', allow_substring=True) >= 0.9",
+          similar("Abbey Road", "Abbey Road Deluxe", allow_substring=True) >= 0.9, True)
+    check("similar('Now Music 45', 'Now Music 54', allow_substring=True) < 0.7",
+          similar("Now Music 45", "Now Music 54", allow_substring=True) < 0.7, True)
 
     for g in list(GENRE_ALIASES.values()) + [g for _, g in GENRE_REGEXES]:
         if g not in MASTER_GENRES:
@@ -1191,8 +1402,8 @@ def run_selftest():
 # CLI
 # ==========================================
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="GenreShark MP3 auto-consensus genre tagger")
-    p.add_argument("path", nargs="?", help="Folder containing your MP3 library (prompted if omitted)")
+    p = argparse.ArgumentParser(description="GenreShark multi-format auto-consensus genre tagger")
+    p.add_argument("path", nargs="?", help="Folder containing your music library (prompted if omitted)")
     p.add_argument("--dry-run", action="store_true",
                    help="Look up genres and write a CSV report of proposed changes; change nothing else")
     p.add_argument("--dry-run-cached", action="store_true",
@@ -1248,7 +1459,7 @@ def main():
             print(f"\033[93m [!] Not set in config.json or the environment: {', '.join(missing)}\033[0m")
             print("     Sources that need them are skipped. Add them to config.json for full coverage.\n")
 
-    target = (args.path or input("Enter the full path to your MP3 folder: ")).strip().strip('"').strip("'")
+    target = (args.path or input("Enter the full path to your music folder: ")).strip().strip('"').strip("'")
     if not os.path.isdir(target):
         print(f"Error: The directory '{target}' does not exist.")
         sys.exit(1)
