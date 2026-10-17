@@ -15,14 +15,11 @@ any run (`--undo`).
 - **Clean taxonomy.** About 280 keyword patterns and aliases (shoegaze, math rock, djent,
   synthwave, ...) are consolidated into 28 genres. The longest match wins, so "Industrial Metal" is
   Metal and "Folk Rock" stays Folk.
-- **Hit verification.** A search result must fuzzily match your artist and album before its tags
-  are trusted, and numbers in titles must agree ("Now 45" will not match "Now 54").
 - **Compilations.** "Various Artists" releases are detected from the folder name or the
   compilation flag and looked up by album title.
 - **Real band names.** "Hall & Oates", "Earth, Wind & Fire" and "AC/DC" are searched as written;
   the first-listed artist is only a strict-match fallback for collaborations.
-- **Many formats.** MP3, FLAC, M4A/MP4, Ogg/Opus, WMA, AIFF, WAV, DSF and more (see below).
-- **Resumable.** Finished folders are remembered, and artist genres are cached between runs.
+- **Resumable.** Finished folders are remembered, and artist genres are cached between runs. GenreCacheEdit Optional WebApp to configure your genre cache!!
 - **Dry run + CSV report.** See every proposed change before touching a file.
 - **Undo.** Every tag change is logged with the genre it replaced.
 - **Safe writes.** ID3v2.3 files stay v2.3, and files without any tag get one.
