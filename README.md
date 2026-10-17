@@ -26,10 +26,6 @@ roll back any run (`--undo`).
 - **Undo.** Every tag change is logged with the genre it replaced.
 - **Safe writes.** ID3v2.3 files stay v2.3, and files without any tag get one.
 
-The 27 genres: Hip Hop, R&B, Soul, Alternative Rock, Rock, Electronic, Metal, Punk, Reggae, Ska,
-Dancehall, Dub, Rocksteady, Pop, Country, Jazz, Folk, Blues, Latin, Classical, World, Soundtrack,
-Comedy, Gospel, Holiday, Children's, New Age.
-
 ## Install
 
 Python 3.9 or newer.
@@ -52,8 +48,6 @@ fallback; a value in `config.json` wins, and empty values never win.
 | `LASTFM_API_KEY` | Official Last.fm API (optional; without it the Last.fm page is scraped, which needs `beautifulsoup4`) |
 
 iTunes, TheAudioDB and MusicBrainz need no keys. Sources without credentials are simply skipped.
-
-**Never commit `config.json`.** It is listed in `.gitignore`.
 
 ## Usage
 
@@ -135,8 +129,7 @@ Here is the complete list of all **Master Genres** currently supported and manag
   
 ## Limitations
 
-- MP3 (ID3) only.
-- Without a Last.fm API key, and for Genius, tags are read from web pages, which can break if those
+- Without a Last.fm and Genius API Key, tags are read from web pages, which can break if those
   sites change.
 - Requests are throttled per host (Apple documents about 20 iTunes requests per minute), so a first pass over a
   large library takes a while. Later runs use the cache.
