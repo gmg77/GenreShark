@@ -20,7 +20,7 @@ any run (`--undo`).
 - **Real band names.** "Hall & Oates", "Earth, Wind & Fire" and "AC/DC" are searched as written;
   the first-listed artist is only a strict-match fallback for collaborations.
 - **Resumable.** Finished folders are remembered, and artist genres are cached between runs.
-- **GenreCacheEdit** Optional WebApp to configure your genre cache!!
+- **GenreShark Web App** Optional powerful edit/personalize your genre cache!!
 - **Dry run + CSV report.** See every proposed change before touching a file.
 - **Undo.** Every tag change is logged with the genre it replaced.
 - **Safe writes.** ID3v2.3 files stay v2.3, and files without any tag get one.
@@ -64,10 +64,10 @@ iTunes, TheAudioDB and MusicBrainz need no keys. Sources without credentials are
 > `config.json` is in your `.gitignore` before you fill it in.
 
 ## Usage
-1. **Run Script on folder with  `--dry-run-cached`
-2. **This will create a CSV file that can edit in GenreShark.html Web App
-3. **Alternatively you can edit artist_cache.json directly in Web APP
-4. **Run in regular mode to and new cache will help with personal preferences
+1. **Run Script test mode** music album folder with  `--dry-run-cached`
+2. **EDIT** This will create a CSV file that can edit in GenreShark.html Web App
+   - Alternatively you can edit artist_cache.json directly in Web APP
+3. **Run Script live mode**in regular mode to and new cache will help with personal preferences
   
 ```
 python GenreShark.py "D:\Music" --dry-run     # 1. preview: writes only a CSV report
@@ -176,7 +176,7 @@ Rocksteady, Ska, Soul, Soundtrack, World.
 - Without a Last.fm API key and Genius credentials, tags are read from web pages, which can break
   if those sites change.
 - A first pass over a large library takes a while because of the per-host limits; later runs use the cache.
-- Genre data is community-sourced. Use `--dry-run` first and review the report.
+- Genre data is community-sourced. Use `--dry-run` first and review the report with Web App.
 
 ## License
 
