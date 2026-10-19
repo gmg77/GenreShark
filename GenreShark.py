@@ -956,6 +956,46 @@ class GenreFinder:
 REPORT_COLUMNS = ("mode", "folder", "file", "artist", "album", "old_genre", "new_genre", "action", "source")
 
 
+def replace_with_retry(src, dst, attempts=8, delay=0.25):
+    """os.replace() that survives Windows sharing violations (WinError 32/5).
+
+    Antivirus, OneDrive/Dropbox sync, the search indexer or an open editor can briefly
+    lock a file we just wrote or are about to replace. Retry with a growing pause."""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return True
+        except PermissionError:
+            if attempt == attempts - 1:
+                return False
+            time.sleep(delay * (attempt + 1))
+    return False
+
+
+def write_json_atomic(path, payload):
+    """Write JSON via a temp file + rename. Never raises: returns the path that actually holds
+    the data (``path`` normally, a side file if ``path`` is locked), or None on total failure."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=0)
+    except OSError as exc:
+        print(f"\n [!] Could not write cache file: {exc}")
+        return None
+    if replace_with_retry(tmp, path):
+        return path
+    # Destination still locked: keep the work under another name instead of crashing.
+    side = f"{os.path.splitext(path)[0]}.{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    if replace_with_retry(tmp, side, attempts=2):
+        print(f"\n [!] {os.path.basename(path)} is locked by another program (antivirus, sync client, "
+              f"editor or a second copy of this script?).\n     Your results were saved to {side}\n"
+              f"     Close whatever has the file open, then rename that file to {os.path.basename(path)}.")
+        return side
+    print(f"\n [!] Could not replace {path}; your results are in {tmp}.\n"
+          f"     Close whatever has the file open, then rename {os.path.basename(tmp)} to {os.path.basename(path)}.")
+    return tmp
+
+
 class MP3TaggerApp:
     def __init__(self, target_dir, args, needs_finder=True):
         self.target_dir = os.path.abspath(target_dir)
@@ -1040,11 +1080,7 @@ class MP3TaggerApp:
     def _save_cache(self):
         if not self.allow_cache_write or not self.artist_cache:
             return
-        tmp = self.cache_file + ".tmp"
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({"version": TAXONOMY_VERSION, "artists": self.artist_cache}, f,
-                      ensure_ascii=False, indent=0)
-        os.replace(tmp, self.cache_file)
+        write_json_atomic(self.cache_file, {"version": TAXONOMY_VERSION, "artists": self.artist_cache})
 
     def _log_undo(self, path, old, new):
         rec = {"run": self.run_id, "ts": datetime.now().isoformat(timespec="seconds"),
@@ -1170,10 +1206,15 @@ class MP3TaggerApp:
                 if audio_files:
                     self._process_folder(root, audio_files)
         finally:
-            if self.finder:
-                self.finder.close()
-            self._save_cache()
-            self._close_report()
+            # Independent steps: a failure in one must not skip the others.
+            try:
+                if self.finder:
+                    self.finder.close()
+            finally:
+                try:
+                    self._save_cache()
+                finally:
+                    self._close_report()
 
     def _process_folder(self, root, audio_files):
         print(f"\n[SCAN] {root}")
