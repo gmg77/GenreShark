@@ -64,10 +64,10 @@ iTunes, TheAudioDB and MusicBrainz need no keys. Sources without credentials are
 > `config.json` is in your `.gitignore` before you fill it in.
 
 ## Usage
-1. **Run Script test mode** music album folder with  `--dry-run-cached`
-2. **EDIT** This will create a CSV file that can edit in GenreShark.html Web App
-   - Alternatively you can edit artist_cache.json directly in Web APP
-3. **Run Script live mode**in regular mode to and new cache will help with personal preferences
+1. **Run Script test mode** with music album folder  `--dry-run-cached`.
+2. **EDIT** - Load CSV file in GenreShark.html Web App to edit.
+   - Alternatively you can edit artist_cache.json directly in Web APP.
+3. **Run Script live mode** and new cache will help with personal preferences/edits.
   
 ```
 python GenreShark.py "D:\Music" --dry-run     # 1. preview: writes only a CSV report
@@ -132,8 +132,6 @@ MusicBrainz is rate-limited by its client library.
 | `artist_cache.json`      | Artist to genre cache (versioned)                                 |
 | `failed_searches.txt`    | Folders where no genre could be found                             |
 | `genre_dry_run_<id>.csv` | The report a dry run produces (the only thing a dry run writes)   |
-
-A dry run does not write the state file, the undo log, or (unless you use `--dry-run-cached`) the cache.
 
 Folders that were tagged, already matched, or where you declined an overwrite are skipped on the next
 run. Folders with no result, with errors, or with no artist/album tags are retried every run.
