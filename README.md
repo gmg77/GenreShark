@@ -64,7 +64,11 @@ iTunes, TheAudioDB and MusicBrainz need no keys. Sources without credentials are
 > `config.json` is in your `.gitignore` before you fill it in.
 
 ## Usage
-
+1. **Run Script on folder with  `--dry-run-cached`
+2. **This will create a CSV file that can edit in GenreShark.html Web App
+3. **Alternatively you can edit artist_cache.json directly in Web APP
+4. **Run in regular mode to and new cache will help with personal preferences
+  
 ```
 python GenreShark.py "D:\Music" --dry-run     # 1. preview: writes only a CSV report
 python GenreShark.py "D:\Music"               # 2. tag the library
