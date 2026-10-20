@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -71,8 +72,10 @@ if "compilation" not in EasyMP4Tags.Get:   # MP4 stores this as the boolean 'cpi
 # ==========================================
 # CONFIGURATION & API KEYS (config.json, then environment)
 # ==========================================
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 USER_AGENT = f"GenreShark/{__version__}"
+PLACEHOLDER_EMAIL = "your-email@example.com"
+PROJECT_URL = "https://github.com/gmg77/GenreShark"   # contact fallback for MusicBrainz
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 CONFIG_KEYS = ("CONTACT_EMAIL", "DISCOGS_TOKEN", "GENIUS_CLIENT_ID",
@@ -112,7 +115,7 @@ def ensure_config_template(path=CONFIG_PATH):
     """Create an empty config.json if none exists. Returns True when one was created."""
     if os.path.exists(path):
         return False
-    template = {k: ("your-email@example.com" if k == "CONTACT_EMAIL" else "") for k in CONFIG_KEYS}
+    template = {k: (PLACEHOLDER_EMAIL if k == "CONTACT_EMAIL" else "") for k in CONFIG_KEYS}
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(template, f, indent=2)
@@ -129,7 +132,7 @@ def _setting(key, default=""):
     return _pick(key, _external_config, os.environ, default)
 
 
-CONTACT_EMAIL = _setting("CONTACT_EMAIL", "your-email@example.com")
+CONTACT_EMAIL = _setting("CONTACT_EMAIL", PLACEHOLDER_EMAIL)
 DISCOGS_TOKEN = _setting("DISCOGS_TOKEN")
 GENIUS_CLIENT_ID = _setting("GENIUS_CLIENT_ID")
 GENIUS_CLIENT_SECRET = _setting("GENIUS_CLIENT_SECRET")
@@ -317,6 +320,58 @@ def is_supported_audio(filename):
     return os.path.splitext(filename)[1].lower() in SUPPORTED_EXTENSIONS
 
 
+# Control characters (incl. ESC) and bidi overrides: tag text is attacker-controlled, so it must
+# never reach the terminal raw.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def clean_text(text):
+    return _CONTROL_CHARS_RE.sub("", text)
+
+
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value):
+    """Neutralise spreadsheet formula injection: cells starting with = + - @ get a leading '."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def is_inside(base, path):
+    """True when `path` resolves to somewhere within `base` (blocks ../ and absolute escapes)."""
+    base = os.path.normcase(os.path.realpath(base))
+    path = os.path.normcase(os.path.realpath(path))
+    try:
+        return os.path.commonpath([base, path]) == base
+    except ValueError:   # e.g. different drives on Windows
+        return False
+
+
+def parse_cache(data):
+    """Validate the raw contents of artist_cache.json.
+
+    Returns (entries, skipped). Each good entry becomes exactly (genre, source); extra trailing
+    elements (e.g. added by the HTML editor) are dropped, and malformed entries are skipped
+    instead of aborting the whole scan."""
+    if not isinstance(data, dict):
+        return {}, 0
+    if isinstance(data.get("artists"), dict) and "version" in data:
+        if data["version"] != TAXONOMY_VERSION:
+            return {}, 0
+        data = data["artists"]
+    entries, skipped = {}, 0
+    for key, value in data.items():
+        if (isinstance(key, str) and isinstance(value, (list, tuple)) and len(value) >= 2
+                and isinstance(value[0], str) and value[0] in MASTER_GENRES
+                and isinstance(value[1], str)):
+            entries[key] = (value[0], value[1])
+        else:
+            skipped += 1
+    return entries, skipped
+
+
 def artist_candidates(raw_artist):
     base = FEAT_SPLIT_RE.split(raw_artist)[0].strip() or raw_artist.strip()
     first = COLLAB_SPLIT_RE.split(base)[0].strip()
@@ -446,7 +501,7 @@ def read_audio_tags(path):
     result = {}
     for k in TAG_KEYS:
         vals = _extract_tag_list(audio, k)
-        val = vals[0] if vals else ""
+        val = clean_text(vals[0]) if vals else ""
         if k == "compilation" and val.lower() in ("true", "1"):
             val = "1"
         result[k] = val
@@ -485,6 +540,20 @@ def write_genre(path, genre):
 
     audio.save()
     return previous
+
+
+def read_genre(path):
+    """Current genre values exactly as write_genre() would report them as `previous`."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".mp3":
+        try:
+            return _genre_frames(ID3(path)) or None
+        except ID3NoHeaderError:
+            return None
+    audio = _open_audio_tags(path)
+    if audio is None:
+        raise ValueError("Unsupported or unreadable audio format")
+    return _extract_tag_list(audio, "genre") or None
 
 
 def restore_genre(path, old, expected, force=False, dry_run=False):
@@ -600,11 +669,12 @@ class GenreFinder:
     def __init__(self, services=None):
         self.session = requests.Session()
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504],
-                      respect_retry_after_header=False)
+                      respect_retry_after_header=True)
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
-        musicbrainzngs.set_useragent("GenreShark", __version__, CONTACT_EMAIL)
+        contact = CONTACT_EMAIL if CONTACT_EMAIL and CONTACT_EMAIL != PLACEHOLDER_EMAIL else PROJECT_URL
+        musicbrainzngs.set_useragent("GenreShark", __version__, contact)
 
         self.throttle = HostThrottle(RATE_LIMITS)
         self._tls = threading.local()
@@ -717,7 +787,17 @@ class GenreFinder:
             if album:
                 params["album"] = album
             data = self._fetch("https://ws.audioscrobbler.com/2.0/", params=params)
-            tags = ((data or {}).get("toptags") or {}).get("tag") or []
+            toptags = (data or {}).get("toptags") or {}
+            # autocorrect=1 can silently swap in a different artist/album, so verify who answered.
+            attr = toptags.get("@attr") or {}
+            if (artist and not is_various(artist) and attr.get("artist")
+                    and similar(attr["artist"], artist) < self._artist_threshold(0.85)):
+                log.debug("Last.fm autocorrected artist %r -> %r; ignoring", artist, attr["artist"])
+                return []
+            if album and attr.get("album") and similar(attr["album"], album, allow_substring=True) < 0.7:
+                log.debug("Last.fm autocorrected album %r -> %r; ignoring", album, attr["album"])
+                return []
+            tags = toptags.get("tag") or []
             if isinstance(tags, dict):
                 tags = [tags]
             return self._valid([t.get("name") for t in tags])
@@ -1000,7 +1080,7 @@ class MP3TaggerApp:
     def __init__(self, target_dir, args, needs_finder=True):
         self.target_dir = os.path.abspath(target_dir)
         self.args = args
-        self.run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
         self.state_file = os.path.join(self.target_dir, "tagger_state.jsonl")
         self.legacy_log = os.path.join(self.target_dir, "tagger_progress.log")
         self.fail_file = os.path.join(self.target_dir, "failed_searches.txt")
@@ -1069,24 +1149,42 @@ class MP3TaggerApp:
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            if isinstance(data.get("artists"), dict) and "version" in data:
-                if data["version"] != TAXONOMY_VERSION:
-                    return {}
-                data = data["artists"]
-            return {k: tuple(v) for k, v in data.items() if v and v[0] in MASTER_GENRES}
-        except (OSError, ValueError, TypeError, AttributeError):
+        except FileNotFoundError:
             return {}
+        except (OSError, ValueError) as exc:
+            print(f" [!] Could not read {os.path.basename(self.cache_file)} ({exc}); starting with an empty cache.")
+            return {}
+        entries, skipped = parse_cache(data)
+        if skipped:
+            print(f" [!] Ignored {skipped} malformed or unrecognised entr{'y' if skipped == 1 else 'ies'} "
+                  f"in {os.path.basename(self.cache_file)}.")
+        return entries
 
     def _save_cache(self):
         if not self.allow_cache_write or not self.artist_cache:
             return
         write_json_atomic(self.cache_file, {"version": TAXONOMY_VERSION, "artists": self.artist_cache})
 
-    def _log_undo(self, path, old, new):
-        rec = {"run": self.run_id, "ts": datetime.now().isoformat(timespec="seconds"),
-               "file": os.path.relpath(path, self.target_dir), "old": old, "new": new}
+    def _append_undo(self, rec):
+        """Append one record and force it to disk, so it survives a crash right after."""
         with open(self.undo_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    def _log_undo(self, path, old, new):
+        """Write-ahead: call this BEFORE modifying the file."""
+        self._append_undo({"run": self.run_id, "ts": datetime.now().isoformat(timespec="seconds"),
+                           "file": os.path.relpath(path, self.target_dir), "old": old, "new": new})
+
+    def _log_undo_rollback(self, path):
+        """The write that _log_undo() announced failed: void that entry so it isn't offered for undo."""
+        try:
+            self._append_undo({"run": self.run_id, "ts": datetime.now().isoformat(timespec="seconds"),
+                               "file": os.path.relpath(path, self.target_dir), "undone": True,
+                               "note": "write failed"})
+        except OSError as exc:
+            log.warning("Could not void undo entry for %s: %s", path, exc)
 
     def _read_undo_log(self):
         writes, undone = [], set()
@@ -1115,9 +1213,9 @@ class MP3TaggerApp:
             r = runs.setdefault(w["run"], {"files": 0, "pending": 0, "ts": w["ts"]})
             r["files"] += 1
             r["pending"] += (w["run"], w["file"]) not in undone
-        print(f"{'RUN ID':<18}{'WHEN':<22}{'FILES':>7}{'CAN UNDO':>10}")
+        print(f"{'RUN ID':<22}{'WHEN':<22}{'FILES':>7}{'CAN UNDO':>10}")
         for run_id, r in runs.items():
-            print(f"{run_id:<18}{r['ts']:<22}{r['files']:>7}{r['pending']:>10}")
+            print(f"{run_id:<22}{r['ts']:<22}{r['files']:>7}{r['pending']:>10}")
 
     def undo(self, which="last", force=False):
         dry = self.is_dry_run
@@ -1141,12 +1239,16 @@ class MP3TaggerApp:
         results, touched = Counter(), set()
         for w in reversed(selected):
             path = os.path.join(self.target_dir, w["file"])
+            name = clean_text(str(w["file"]))
+            if not is_inside(self.target_dir, path):
+                results["unsafe"] += 1
+                print(f"  ! Refused (path escapes the library folder): {name}")
+                continue
             status = restore_genre(path, w["old"], w["new"], force=force, dry_run=dry)
             results[status] += 1
-            name = w["file"]
             if status == "restored":
                 touched.add(os.path.dirname(path))
-                target = f"'{', '.join(w['old'])}'" if w["old"] else "no genre tag"
+                target = f"'{clean_text(', '.join(str(g) for g in w['old']))}'" if w["old"] else "no genre tag"
                 print(f"  {'[DRY RUN] Would restore' if dry else '+ Restored'} {target}: {name}")
                 if not dry:
                     with open(self.undo_file, 'a', encoding='utf-8') as f:
@@ -1160,7 +1262,7 @@ class MP3TaggerApp:
         for folder in sorted(touched):
             self._record(folder, "undone", run=scope)
         print(f"\n[UNDO] restored: {results['restored']}, skipped (edited since): {results['changed']}, "
-              f"missing: {results['missing']}")
+              f"missing: {results['missing']}, refused (unsafe path): {results['unsafe']}")
 
     def _open_report(self):
         if not self.report_path:
@@ -1173,8 +1275,9 @@ class MP3TaggerApp:
     def _report(self, root, filename, artist, album, old, new, action, source=""):
         if self._report_writer is None:
             return
-        self._report_writer.writerow(["dry-run" if self.is_dry_run else "applied", self._key(root),
-                                      filename, artist, album, old, new, action, source])
+        row = ["dry-run" if self.is_dry_run else "applied", self._key(root),
+               filename, artist, album, old, new, action, source]
+        self._report_writer.writerow([csv_safe(c) for c in row])
         self._report_file.flush()
 
     def _close_report(self):
@@ -1370,16 +1473,19 @@ class MP3TaggerApp:
                 self._report(root, f, artist, album, existing, genre, action, source)
                 modified += 1
                 continue
-            try:
-                previous = write_genre(path, genre)
+            try:   # write-ahead: no undo record, no change
+                self._log_undo(path, read_genre(path), genre)
             except Exception as exc:
-                print(f"      ! Error saving {f}: {exc}")
+                print(f"      ! Skipped (could not record undo entry first): {f}: {exc}")
                 errors += 1
                 continue
             try:
-                self._log_undo(path, previous, genre)
-            except OSError as exc:
-                print(f"      ! Tagged, but could not write the undo log entry: {exc}")
+                write_genre(path, genre)
+            except Exception as exc:
+                print(f"      ! Error saving {f}: {exc}")
+                errors += 1
+                self._log_undo_rollback(path)
+                continue
             print(f"      + Overwrote with '{genre}': {f}" if existing else f"      + Tagged: {f}")
             self._report(root, f, artist, album, existing, genre, "overwrote" if existing else "tagged", source)
             modified += 1
@@ -1434,6 +1540,27 @@ def run_selftest():
     for g in list(GENRE_ALIASES.values()) + [g for _, g in GENRE_REGEXES]:
         if g not in MASTER_GENRES:
             failures.append(f"  FAIL taxonomy: {g!r} is not in MASTER_GENRES")
+
+    # Cache loading: entries with extra elements (as round-tripped by the HTML editor) must not
+    # crash, and malformed entries must be skipped rather than abort the scan.
+    entries, skipped = parse_cache({"version": TAXONOMY_VERSION, "artists": {
+        "a": ["Rock", "Discogs, iTunes", "extra", 3],
+        "b": ["Rock"], "c": "Rock", "d": ["NotAGenre", "x"], "e": ["Jazz", "MusicBrainz"],
+        "f": [None, "x"], "g": None}})
+    check("parse_cache entries", entries, {"a": ("Rock", "Discogs, iTunes"), "e": ("Jazz", "MusicBrainz")})
+    check("parse_cache skipped", skipped, 5)
+    check("parse_cache wrong version", parse_cache({"version": "0.0", "artists": {"a": ["Rock", "x"]}}), ({}, 0))
+    check("parse_cache legacy flat", parse_cache({"a": ["Rock", "x"]}), ({"a": ("Rock", "x")}, 0))
+    check("parse_cache non-dict", parse_cache([1, 2]), ({}, 0))
+
+    check("csv_safe formula", csv_safe("=1+1"), "'=1+1")
+    check("csv_safe '+/-'", csv_safe("+/-"), "'+/-")
+    check("csv_safe plain", csv_safe("Beatles"), "Beatles")
+    check("csv_safe non-str", csv_safe(5), 5)
+    check("clean_text", clean_text("a\x1b[31mb\u202ec"), "a[31mbc")
+    check("is_inside ok", is_inside("/lib", "/lib/a/b.mp3"), True)
+    check("is_inside ../", is_inside("/lib", "/lib/../etc/passwd"), False)
+    check("is_inside absolute", is_inside("/lib", os.path.join("/lib", "/etc/passwd")), False)
 
     print("\n".join(failures) if failures else "All self-tests passed.")
     return 1 if failures else 0
@@ -1492,13 +1619,16 @@ def main():
     print("=" * 60)
 
     if not (undo_mode or args.list_runs):
-        if ensure_config_template():
+        if not (args.dry_run or args.dry_run_cached) and ensure_config_template():
             print(f"\033[92m [+] Created an empty settings template: {CONFIG_PATH}\033[0m")
         missing = [k for k, v in (("DISCOGS_TOKEN", DISCOGS_TOKEN), ("GENIUS_CLIENT_ID", GENIUS_CLIENT_ID),
                                   ("GENIUS_CLIENT_SECRET", GENIUS_CLIENT_SECRET)) if not v]
         if missing:
             print(f"\033[93m [!] Not set in config.json or the environment: {', '.join(missing)}\033[0m")
             print("     Sources that need them are skipped. Add them to config.json for full coverage.\n")
+        if CONTACT_EMAIL in ("", PLACEHOLDER_EMAIL):
+            print("\033[93m [!] CONTACT_EMAIL is not set; MusicBrainz will be sent the project URL instead.\033[0m")
+            print("     Set your real email in config.json to identify yourself properly.\n")
 
     target = (args.path or input("Enter the full path to your music folder: ")).strip().strip('"').strip("'")
     if not os.path.isdir(target):
